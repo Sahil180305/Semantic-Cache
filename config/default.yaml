@@ -1,0 +1,104 @@
+# Default Configuration for Semantic Cache Layer
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  debug: false
+
+cache:
+  # L1 Cache (In-Memory)
+  l1:
+    type: "hnsw"
+    max_entries: 100000
+    dimension: 384
+    ef_construction: 200
+    ef_search: 100
+    
+  # L2 Cache (SSD/Memory mapped)
+  l2:
+    type: "faiss"
+    max_entries: 1000000
+    index_type: "IVF"
+    nlist: 1000
+    
+  # L3 Cache (Disk/Object Storage)
+  l3:
+    type: "disk"
+    max_entries: 10000000
+    quantization: "int8"
+    storage_path: "./data/l3_cache"
+
+embedding:
+  model: "sentence-transformers/all-MiniLM-L6-v2"
+  dimension: 384
+  batch_size: 32
+  cache_embeddings: true
+  provider: "local"  # local, openai, cohere, huggingface
+
+similarity:
+  default_threshold: 0.85
+  metric: "cosine"  # cosine, euclidean, inner_product
+  adaptive_thresholds:
+    medical: 0.95
+    legal: 0.92
+    ecommerce: 0.80
+    general: 0.85
+
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+  password: null
+  ssl: false
+  max_connections: 50
+
+database:
+  url: "postgresql://user:password@localhost/semantic_cache"
+  pool_size: 20
+  max_overflow: 40
+  echo: false
+
+multi_tenancy:
+  enabled: true
+  isolation_level: "full"  # full, logical
+  default_quota:
+    max_entries: 100000
+    max_qps: 1000
+    storage_gb: 10
+
+monitoring:
+  enabled: true
+  prometheus_port: 9090
+  log_level: "INFO"
+  metrics_interval_seconds: 60
+  
+  # Prometheus metrics
+  prometheus:
+    enabled: true
+    port: 9090
+
+  # Jaeger tracing
+  jaeger:
+    enabled: false
+    agent_host: "localhost"
+    agent_port: 6831
+
+logging:
+  level: "INFO"
+  format: "json"  # json, text
+  file: "./logs/app.log"
+  max_size_mb: 100
+  backup_count: 5
+
+performance:
+  enable_async: true
+  enable_caching: true
+  connection_pooling: true
+  cache_warmup_interval: 3600  # seconds
+
+security:
+  enable_auth: false
+  auth_provider: "oidc"  # oidc, jwt, basic
+  enable_encryption: false
+  encryption_key: null
