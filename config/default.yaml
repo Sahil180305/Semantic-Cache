@@ -72,17 +72,6 @@ monitoring:
   prometheus_port: 9090
   log_level: "INFO"
   metrics_interval_seconds: 60
-  
-  # Prometheus metrics
-  prometheus:
-    enabled: true
-    port: 9090
-
-  # Jaeger tracing
-  jaeger:
-    enabled: false
-    agent_host: "localhost"
-    agent_port: 6831
 
 logging:
   level: "INFO"
