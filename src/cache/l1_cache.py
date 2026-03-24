@@ -1,22 +1,24 @@
 """
 L1 In-Memory Cache Layer
 
-High-performance in-memory cache using HNSW for semantic similarity search.
-Integrates embeddings and similarity search with configurable eviction policies
+High-performance in-memory cache that delegates semantic search to UnifiedIndexManager.
+Provides fast key-value storage with configurable eviction policies
 and comprehensive metrics tracking.
 
 Features:
-- HNSW-based semantic search for query matching
-- Query deduplication with exact and semantic matching
+- Query deduplication with exact text matching
 - Configurable eviction policies (LRU, LFU, TTL, FIFO, Adaptive)
 - Memory management with configurable limits
 - Comprehensive hit rate and performance metrics
-- Domain-aware threshold configuration
+
+NOTE: Semantic similarity search is delegated to UnifiedIndexManager.
+This cache layer focuses on storage and eviction, not indexing.
 """
 
 import hashlib
 import time
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, TYPE_CHECKING
+
 from collections import OrderedDict
 
 from src.cache.base import (
@@ -24,23 +26,25 @@ from src.cache.base import (
     CacheBackendInterface, EvictionPolicyInterface
 )
 from src.cache.policies import create_eviction_policy
-from src.similarity.index import HNSWIndex
-from src.similarity.base import (
-    SimilarityAlgorithm, SimilarityAlgorithmFactory, SimilarityMetric, DomainType
-)
+
+# Avoid circular import
+if TYPE_CHECKING:
+    from src.cache.index_manager import UnifiedIndexManager
 
 
 class L1Cache(CacheBackendInterface):
     """
-    L1 In-Memory Cache using HNSW for similarity-based retrieval.
+    L1 In-Memory Cache with delegated similarity search.
     
     Provides:
-    - Fast semantic search using HNSW indexing
+    - Fast key-value storage (OrderedDict)
     - Exact text deduplication for identical queries
     - Configurable memory and size limits
     - Pluggable eviction policies
-    - Domain-aware threshold configuration
     - Comprehensive metrics tracking
+    
+    NOTE: Semantic similarity search is delegated to UnifiedIndexManager.
+    Call set_index_manager() to enable similarity-based lookups.
     """
     
     def __init__(self, config: CacheConfig):
@@ -56,16 +60,8 @@ class L1Cache(CacheBackendInterface):
         self.entries: Dict[str, CacheEntry] = OrderedDict()  # query_id -> entry
         self.text_to_id: Dict[str, str] = {}  # query_text_hash -> query_id (for dedup)
         
-        # HNSW indexing for similarity search
-        similarity_algo = SimilarityAlgorithmFactory.get_algorithm(SimilarityMetric.COSINE)
-        self.hnsw_index = HNSWIndex(
-            dimension=config.embedding_dimension,
-            similarity_algorithm=similarity_algo,
-            m=16,
-            ef=200,
-            max_m=48,
-            seed=42,
-        )
+        # UnifiedIndexManager for similarity search (set via set_index_manager)
+        self._index_manager: Optional['UnifiedIndexManager'] = None
         
         # Eviction policy
         self.eviction_policy = create_eviction_policy(
@@ -78,6 +74,15 @@ class L1Cache(CacheBackendInterface):
         
         # Internal state
         self._next_query_id = 0
+    
+    def set_index_manager(self, index_manager: 'UnifiedIndexManager') -> None:
+        """
+        Set the unified index manager for similarity search.
+        
+        Args:
+            index_manager: UnifiedIndexManager instance
+        """
+        self._index_manager = index_manager
     
     def _generate_query_id(self) -> str:
         """Generate unique query ID."""
@@ -133,12 +138,8 @@ class L1Cache(CacheBackendInterface):
         
         entry = self.entries[query_id]
         
-        # Remove from HNSW index
-        try:
-            # HNSW index doesn't have delete, so mark as invalid in separate tracking
-            pass
-        except Exception:
-            pass
+        # Note: We don't remove from UnifiedIndexManager here
+        # Index cleanup is handled separately by index manager
         
         # Remove from text dedup cache
         text_hash = self._hash_query_text(entry.query_text)
@@ -162,6 +163,9 @@ class L1Cache(CacheBackendInterface):
         """
         Store entry in cache.
         
+        NOTE: This method stores the entry in L1 cache only.
+        Indexing to UnifiedIndexManager should be done by CacheManager.put_semantic()
+        
         Args:
             entry: CacheEntry to store
             
@@ -178,23 +182,8 @@ class L1Cache(CacheBackendInterface):
         if not entry.query_id or entry.query_id.startswith("q_"):
             entry.query_id = self._generate_query_id()
         
-        # Don't overwrite if already exists
-        if entry.query_id in self.entries:
-            # Update existing entry instead
-            self.entries[entry.query_id] = entry
-        else:
-            self.entries[entry.query_id] = entry
-        
-        # Add to HNSW index
-        try:
-            self.hnsw_index.insert(
-                entry.query_id,
-                entry.embedding,
-                metadata={"text": entry.query_text, "domain": entry.domain}
-            )
-        except ValueError:
-            # Entry already in index, that's ok
-            pass
+        # Store in entries dict
+        self.entries[entry.query_id] = entry
         
         # Update text deduplication cache
         text_hash = self._hash_query_text(entry.query_text)
@@ -242,33 +231,42 @@ class L1Cache(CacheBackendInterface):
         embedding: List[float],
         k: int = 5,
         threshold: float = 0.85,
+        tenant_id: Optional[str] = None,
+        domain: str = "general",
     ) -> List[Tuple[str, float]]:
         """
-        Search for semantically similar entries using HNSW.
+        Search for semantically similar entries via UnifiedIndexManager.
         
         Args:
             embedding: Query embedding
             k: Number of results
             threshold: Minimum similarity threshold
+            tenant_id: Tenant ID for filtering
+            domain: Domain for threshold lookup
             
         Returns:
             List of (query_id, similarity) tuples sorted by similarity (descending)
         """
-        if len(self.entries) == 0:
+        if not self._index_manager:
+            # Fallback: no similarity search available
             return []
         
-        # Search HNSW index
-        results = self.hnsw_index.search(embedding, k=k)
+        # Delegate to UnifiedIndexManager
+        results = self._index_manager.search(
+            embedding=embedding,
+            k=k,
+            threshold=threshold,
+            domain=domain,
+            tenant_id=tenant_id,
+        )
         
-        # Filter by threshold
-        filtered = [(qid, sim) for qid, sim in results if sim >= threshold]
-        
-        # Verify entries are not expired
+        # Filter to only return entries that exist in this cache and are not expired
         valid_results = []
-        for query_id, similarity in filtered:
-            entry = self.entries.get(query_id)
-            if entry and not entry.is_expired(self.config.ttl_seconds):
-                valid_results.append((query_id, similarity))
+        for item_id, similarity, entry in results:
+            if item_id in self.entries:
+                cache_entry = self.entries[item_id]
+                if not cache_entry.is_expired(self.config.ttl_seconds):
+                    valid_results.append((item_id, similarity))
         
         return valid_results
     
@@ -301,14 +299,14 @@ class L1Cache(CacheBackendInterface):
         domain: str = "general",
         similarity_threshold: Optional[float] = None,
         dedup_threshold: float = 0.99,
+        tenant_id: Optional[str] = None,
     ) -> Optional[Tuple[str, CacheHitReason, float]]:
         """
         Find matching cache entry using both exact and semantic matching.
         
         High-priority matching strategy:
         1. Exact text match (deterministic, fastest)
-        2. Semantic similarity match (similarity search)
-        3. Hybrid: combine both for robustness
+        2. Semantic similarity match (via UnifiedIndexManager)
         
         Args:
             query_text: Original query text
@@ -316,28 +314,16 @@ class L1Cache(CacheBackendInterface):
             domain: Domain for threshold lookup
             similarity_threshold: Override threshold (uses domain default if None)
             dedup_threshold: Threshold for dedup hits (default 0.99)
+            tenant_id: Tenant ID for filtering
             
         Returns:
             Tuple of (query_id, hit_reason, similarity) if match found, None otherwise
         """
         # Default threshold based on domain
         if similarity_threshold is None:
-            # Use default threshold if not specified
-            try:
-                from src.similarity.base import DomainThresholdConfig, DomainType
-                # Try to map string domain to DomainType enum
-                domain_type_map = {
-                    "medical": DomainType.MEDICAL,
-                    "legal": DomainType.LEGAL,
-                    "financial": DomainType.FINANCIAL,
-                    "ecommerce": DomainType.ECOMMERCE,
-                    "general": DomainType.GENERAL,
-                }
-                domain_enum = domain_type_map.get(domain.lower(), DomainType.GENERAL)
-                domain_config = DomainThresholdConfig()
-                similarity_threshold = domain_config.get_threshold(domain_enum)
-            except Exception:
-                # Fallback to 0.85 if config fails
+            if self._index_manager:
+                similarity_threshold = self._index_manager.get_threshold(domain)
+            else:
                 similarity_threshold = 0.85
         
         # Strategy 1: Exact match (fastest path)
@@ -347,8 +333,14 @@ class L1Cache(CacheBackendInterface):
                 self.metrics.exact_match_hits += 1
                 return (exact_match_id, CacheHitReason.EXACT_MATCH, 1.0)
         
-        # Strategy 2: Semantic similarity
-        semantic_results = self.search_similar(embedding, k=1, threshold=similarity_threshold)
+        # Strategy 2: Semantic similarity via UnifiedIndexManager
+        semantic_results = self.search_similar(
+            embedding, 
+            k=1, 
+            threshold=similarity_threshold,
+            tenant_id=tenant_id,
+            domain=domain,
+        )
         
         if semantic_results:
             query_id, similarity = semantic_results[0]
@@ -384,7 +376,7 @@ class L1Cache(CacheBackendInterface):
         self.entries.clear()
         self.text_to_id.clear()
         self.eviction_policy.reset()
-        # Note: Can't fully reset HNSW without recreating it
+        # Note: Index cleanup handled separately by UnifiedIndexManager
     
     def size(self) -> int:
         """Get number of entries."""

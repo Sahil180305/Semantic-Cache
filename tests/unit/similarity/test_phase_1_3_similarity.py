@@ -7,11 +7,15 @@ Comprehensive tests for:
 - Similarity search service with caching and metrics
 - Query deduplication
 - Domain-adaptive thresholds
+
+NOTE: SimilaritySearchService now uses UnifiedIndexManager as the single source of truth.
+Tests that need indexing must provide an UnifiedIndexManager instance.
 """
 
 import pytest
 import math
 from typing import List
+from unittest.mock import Mock, MagicMock
 
 from src.similarity.base import (
     SimilarityMetric,
@@ -32,7 +36,34 @@ from src.similarity.service import (
     QueryDeduplicator,
     SimilaritySearchMetrics,
 )
+from src.cache.index_manager import UnifiedIndexManager, IndexConfig
 from src.core.exceptions import SimilarityError
+
+
+# ============================================================================
+# Fixtures for UnifiedIndexManager
+# ============================================================================
+
+@pytest.fixture
+def index_manager():
+    """Create a fresh UnifiedIndexManager for testing."""
+    # Reset singleton for clean tests
+    UnifiedIndexManager.reset_instance()
+    config = IndexConfig(dimension=3)
+    manager = UnifiedIndexManager.get_instance(config)
+    yield manager
+    # Cleanup
+    UnifiedIndexManager.reset_instance()
+
+
+@pytest.fixture
+def index_manager_2d():
+    """Create a fresh UnifiedIndexManager with 2D embeddings."""
+    UnifiedIndexManager.reset_instance()
+    config = IndexConfig(dimension=2)
+    manager = UnifiedIndexManager.get_instance(config)
+    yield manager
+    UnifiedIndexManager.reset_instance()
 
 
 # ============================================================================
@@ -387,45 +418,74 @@ class TestHNSWIndex:
 # ============================================================================
 
 class TestSimilaritySearchService:
-    """Test high-level similarity search service."""
+    """Test high-level similarity search service (facade pattern)."""
     
-    def test_service_initialization(self):
-        """Test creating similarity search service."""
+    def test_service_initialization(self, index_manager):
+        """Test creating similarity search service with index manager."""
         service = SimilaritySearchService(
             metric=SimilarityMetric.COSINE,
             dimension=3,
+            index_manager=index_manager,
         )
         
         assert service.metric == SimilarityMetric.COSINE
         assert service.dimension == 3
+        assert service.is_ready
     
-    def test_add_to_index(self):
-        """Test adding items to search index."""
-        service = SimilaritySearchService(dimension=3)
-        
-        service.add_to_index("query1", [0.1, 0.2, 0.3], metadata={"text": "test"})
-        service.add_to_index("query2", [0.15, 0.25, 0.35])
-        
-        assert len(service.index.data) == 2
-    
-    def test_dimension_validation(self):
-        """Test dimension validation in add_to_index."""
-        service = SimilaritySearchService(dimension=3)
-        
-        with pytest.raises(SimilarityError, match="DIMENSION_MISMATCH"):
-            service.add_to_index("query1", [0.1, 0.2])  # Only 2 dims
-    
-    def test_similarity_search(self):
-        """Test performing similarity search."""
+    def test_service_without_index_manager(self):
+        """Test service is not ready without index manager."""
         service = SimilaritySearchService(
             metric=SimilarityMetric.COSINE,
             dimension=3,
         )
         
+        assert not service.is_ready
+    
+    def test_set_index_manager(self, index_manager):
+        """Test setting index manager after initialization."""
+        service = SimilaritySearchService(dimension=3)
+        assert not service.is_ready
+        
+        service.set_index_manager(index_manager)
+        assert service.is_ready
+    
+    def test_add_to_index(self, index_manager):
+        """Test adding items to search index via UnifiedIndexManager."""
+        service = SimilaritySearchService(dimension=3, index_manager=index_manager)
+        
+        service.add_to_index("query1", [0.1, 0.2, 0.3], metadata={"text": "test"}, query_text="test")
+        service.add_to_index("query2", [0.15, 0.25, 0.35], query_text="test2")
+        
+        assert index_manager.size() == 2
+        assert index_manager.contains("query1")
+        assert index_manager.contains("query2")
+    
+    def test_add_to_index_without_manager(self):
+        """Test add_to_index fails without index manager."""
+        service = SimilaritySearchService(dimension=3)
+        
+        with pytest.raises(SimilarityError, match="INDEX_NOT_CONFIGURED"):
+            service.add_to_index("query1", [0.1, 0.2, 0.3])
+    
+    def test_dimension_validation(self, index_manager):
+        """Test dimension validation in add_to_index."""
+        service = SimilaritySearchService(dimension=3, index_manager=index_manager)
+        
+        with pytest.raises(SimilarityError, match="DIMENSION_MISMATCH"):
+            service.add_to_index("query1", [0.1, 0.2])  # Only 2 dims
+    
+    def test_similarity_search(self, index_manager):
+        """Test performing similarity search."""
+        service = SimilaritySearchService(
+            metric=SimilarityMetric.COSINE,
+            dimension=3,
+            index_manager=index_manager,
+        )
+        
         # Index items
-        service.add_to_index("item1", [1.0, 0.0, 0.0])
-        service.add_to_index("item2", [0.9, 0.1, 0.0])
-        service.add_to_index("item3", [0.0, 1.0, 0.0])
+        service.add_to_index("item1", [1.0, 0.0, 0.0], query_text="item1")
+        service.add_to_index("item2", [0.9, 0.1, 0.0], query_text="item2")
+        service.add_to_index("item3", [0.0, 1.0, 0.0], query_text="item3")
         
         # Search
         request = SimilaritySearchRequest(
@@ -442,15 +502,28 @@ class TestSimilaritySearchService:
         if result.matches:
             assert result.matches[0].rank == 1
     
-    def test_domain_threshold_application(self):
+    def test_search_without_manager(self):
+        """Test search fails without index manager."""
+        service = SimilaritySearchService(dimension=3)
+        
+        request = SimilaritySearchRequest(
+            query_embedding=[1.0, 0.0, 0.0],
+            query_id="q1",
+        )
+        
+        with pytest.raises(SimilarityError, match="INDEX_NOT_CONFIGURED"):
+            service.search(request)
+    
+    def test_domain_threshold_application(self, index_manager_2d):
         """Test that domain-specific thresholds are applied."""
         service = SimilaritySearchService(
             metric=SimilarityMetric.COSINE,
             dimension=2,
+            index_manager=index_manager_2d,
         )
         
-        service.add_to_index("item1", [1.0, 0.0])
-        service.add_to_index("item2", [0.85, 0.1])  # Lower similarity
+        service.add_to_index("item1", [1.0, 0.0], query_text="item1")
+        service.add_to_index("item2", [0.85, 0.1], query_text="item2")  # Lower similarity
         
         # Medical domain requires 0.95
         request = SimilaritySearchRequest(
@@ -465,13 +538,13 @@ class TestSimilaritySearchService:
         # Verify threshold was applied
         assert result.threshold == 0.95
     
-    def test_batch_search(self):
+    def test_batch_search(self, index_manager_2d):
         """Test batch similarity search."""
-        service = SimilaritySearchService(dimension=2)
+        service = SimilaritySearchService(dimension=2, index_manager=index_manager_2d)
         
         # Index items
         for i in range(5):
-            service.add_to_index(f"item{i}", [float(i)/5, float(i)/5])
+            service.add_to_index(f"item{i}", [float(i)/5, float(i)/5], query_text=f"item{i}")
         
         # Batch search
         requests = [
@@ -486,14 +559,15 @@ class TestSimilaritySearchService:
         
         assert len(results) == 3
     
-    def test_query_deduplication(self):
+    def test_query_deduplication(self, index_manager_2d):
         """Test query deduplication in service."""
         service = SimilaritySearchService(
             dimension=2,
             enable_deduplication=True,
+            index_manager=index_manager_2d,
         )
         
-        service.add_to_index("item1", [0.5, 0.5])
+        service.add_to_index("item1", [0.5, 0.5], query_text="item1")
         
         request = SimilaritySearchRequest(
             query_embedding=[0.5, 0.5],
@@ -511,26 +585,26 @@ class TestSimilaritySearchService:
         # Second search with same text is deduped
         request.query_id = "q2"
         result2 = service.search(request)
-        # Deduplication should be flagged
+        # Deduplication should be flagged in metrics
     
-    def test_clear_index(self):
+    def test_clear_index(self, index_manager_2d):
         """Test clearing the index."""
-        service = SimilaritySearchService(dimension=2)
+        service = SimilaritySearchService(dimension=2, index_manager=index_manager_2d)
         
-        service.add_to_index("item1", [0.5, 0.5])
-        service.add_to_index("item2", [0.6, 0.6])
+        service.add_to_index("item1", [0.5, 0.5], query_text="item1")
+        service.add_to_index("item2", [0.6, 0.6], query_text="item2")
         
-        assert len(service.index.data) == 2
+        assert index_manager_2d.size() == 2
         
         service.clear_index()
         
-        assert len(service.index.data) == 0
+        assert index_manager_2d.size() == 0
     
-    def test_get_metrics(self):
+    def test_get_metrics(self, index_manager_2d):
         """Test retrieving service metrics."""
-        service = SimilaritySearchService(dimension=2)
+        service = SimilaritySearchService(dimension=2, index_manager=index_manager_2d)
         
-        service.add_to_index("item1", [0.5, 0.5])
+        service.add_to_index("item1", [0.5, 0.5], query_text="item1")
         
         request = SimilaritySearchRequest(
             query_embedding=[0.5, 0.5],
@@ -542,8 +616,35 @@ class TestSimilaritySearchService:
         
         assert "search_metrics" in metrics
         assert "index" in metrics
-        assert "threshold_config" in metrics
+        assert "index_manager_connected" in metrics
+        assert metrics["index_manager_connected"] is True
         assert metrics["search_metrics"]["total_searches"] == 1
+    
+    def test_contains(self, index_manager):
+        """Test checking if item exists."""
+        service = SimilaritySearchService(dimension=3, index_manager=index_manager)
+        
+        assert not service.contains("item1")
+        
+        service.add_to_index("item1", [0.5, 0.5, 0.5], query_text="item1")
+        
+        assert service.contains("item1")
+        assert not service.contains("item2")
+    
+    def test_delete_from_index(self, index_manager):
+        """Test deleting item from index."""
+        service = SimilaritySearchService(dimension=3, index_manager=index_manager)
+        
+        service.add_to_index("item1", [0.5, 0.5, 0.5], query_text="item1")
+        assert service.contains("item1")
+        
+        result = service.delete_from_index("item1")
+        assert result is True
+        assert not service.contains("item1")
+        
+        # Delete non-existent
+        result = service.delete_from_index("item999")
+        assert result is False
 
 
 # ============================================================================
@@ -551,15 +652,20 @@ class TestSimilaritySearchService:
 # ============================================================================
 
 class TestSimilarityIntegration:
-    """Integration tests for similarity search."""
+    """Integration tests for similarity search with UnifiedIndexManager."""
     
     def test_end_to_end_search(self):
         """Test complete end-to-end similarity search workflow."""
+        # Reset and create index manager
+        UnifiedIndexManager.reset_instance()
+        index_manager = UnifiedIndexManager.get_instance(IndexConfig(dimension=4))
+        
         # Create service
         service = SimilaritySearchService(
             metric=SimilarityMetric.COSINE,
             dimension=4,
             enable_deduplication=True,
+            index_manager=index_manager,
         )
         
         # Index documents with embeddings
@@ -571,7 +677,7 @@ class TestSimilarityIntegration:
         ]
         
         for doc_id, embedding, metadata in documents:
-            service.add_to_index(doc_id, embedding, metadata)
+            service.add_to_index(doc_id, embedding, metadata, query_text=metadata["text"])
         
         # Search for machine learning docs
         request = SimilaritySearchRequest(
@@ -591,6 +697,9 @@ class TestSimilarityIntegration:
         # Get metrics
         metrics = service.get_metrics()
         assert metrics["search_metrics"]["total_searches"] == 1
+        
+        # Cleanup
+        UnifiedIndexManager.reset_instance()
     
     def test_multiple_metrics(self):
         """Test using different similarity metrics."""
@@ -601,9 +710,13 @@ class TestSimilarityIntegration:
         ]
         
         for metric in metrics_to_test:
-            service = SimilaritySearchService(metric=metric, dimension=2)
-            service.add_to_index("item1", [0.5, 0.5])
-            service.add_to_index("item2", [0.6, 0.6])
+            # Reset for each metric test
+            UnifiedIndexManager.reset_instance()
+            index_manager = UnifiedIndexManager.get_instance(IndexConfig(dimension=2))
+            
+            service = SimilaritySearchService(metric=metric, dimension=2, index_manager=index_manager)
+            service.add_to_index("item1", [0.5, 0.5], query_text="item1")
+            service.add_to_index("item2", [0.6, 0.6], query_text="item2")
             
             request = SimilaritySearchRequest(
                 query_embedding=[0.5, 0.5],
@@ -613,3 +726,6 @@ class TestSimilarityIntegration:
             
             result = service.search(request)
             assert result.matches  # Should have at least one match
+        
+        # Cleanup
+        UnifiedIndexManager.reset_instance()

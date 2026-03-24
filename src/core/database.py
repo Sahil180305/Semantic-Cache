@@ -92,9 +92,9 @@ class DatabaseManager:
             else:
                 engine_kwargs["poolclass"] = NullPool
             
-            # Add connection timeout for non-SQLite
-            if "sqlite" not in self.config.url:
-                engine_kwargs["connect_args"] = {"timeout": 30}
+            # Add connection timeout for PostgreSQL (psycopg2 uses connect_timeout)
+            if "postgresql" in self.config.url:
+                engine_kwargs["connect_args"] = {"connect_timeout": 30}
             
             engine = create_engine(self.config.url, **engine_kwargs)
 

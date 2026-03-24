@@ -1,4 +1,4 @@
-"""Search and similarity endpoints."""
+"""Search and similarity endpoints with unified index integration."""
 
 import sys
 import os
@@ -11,10 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from ..schemas import SearchRequest, SearchResponse, SearchResult
 from ..auth.jwt import get_current_user, get_tenant_id, TokenPayload
-from src.embedding.service import EmbeddingService
-from src.embedding.base import EmbeddingProviderType
-from src.similarity.service import SimilaritySearchService
-from src.similarity.base import SimilarityMetric, SimilaritySearchRequest as SimilarityReq, DomainType
+from src.similarity.base import SimilarityMetric, DomainType
 
 router = APIRouter()
 
@@ -26,73 +23,95 @@ async def search_cache(
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
-    """Find semantically similar cached queries."""
-    # Get services from app state
-    embedding_service = http_request.app.state.embedding_service if hasattr(http_request.app.state, 'embedding_service') else None
-    similarity_service = http_request.app.state.similarity_service if hasattr(http_request.app.state, 'similarity_service') else None
-    cache_manager = http_request.app.state.cache_manager if hasattr(http_request.app.state, 'cache_manager') else None
+    """
+    Find semantically similar cached queries.
     
-    if embedding_service is None or similarity_service is None:
+    This endpoint searches the unified similarity index for cached items
+    that are semantically similar to the query. It uses the same index
+    that cache PUT operations populate.
+    """
+    # Get services from app state
+    embedding_service = getattr(http_request.app.state, 'embedding_service', None)
+    cache_manager = getattr(http_request.app.state, 'cache_manager', None)
+    index_manager = getattr(http_request.app.state, 'index_manager', None)
+    domain_classifier = getattr(http_request.app.state, 'domain_classifier', None)
+    threshold_manager = getattr(http_request.app.state, 'adaptive_thresholds', None)
+    
+    if embedding_service is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Embedding or similarity service not available"
+            detail="Embedding service not available"
+        )
+    
+    if index_manager is None and cache_manager is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Search index not available"
         )
     
     try:
-        # Generate embedding for query
         start_time = time.time()
         
+        # Generate embedding for query
         embedding_record = await embedding_service.embed_text(request.query)
         embedding = embedding_record.embedding
         
-        # Search for similar items in similarity service
-        metric = SimilarityMetric(request.metric) if request.metric in [m.value for m in SimilarityMetric] else SimilarityMetric.COSINE
-        
-        # Phase 4 Intelligence: Adaptive Threshold & Domain Classification
-        domain_classifier = getattr(http_request.app.state, 'domain_classifier', None)
-        threshold_manager = getattr(http_request.app.state, 'adaptive_thresholds', None)
-        
+        # Detect domain for adaptive thresholds
         domain_str = "general"
         if domain_classifier:
             domain_str = domain_classifier.classify(request.query)
-            
-        # Use adaptive threshold unless user explicitly provided one that differs from default (assuming 0.75 default)
-        # For simplicity, if threshold manager exists, we override the default fallback
+        
+        # Get adaptive threshold
         final_threshold = request.threshold
-        if threshold_manager and (request.threshold == 0.75 or request.threshold is None):
+        if threshold_manager and request.threshold == 0.75:  # Default value
             final_threshold = threshold_manager.get_threshold(domain_str)
-
-        search_req = SimilarityReq(
-            query_embedding=embedding,
-            query_id=f"search_{int(time.time() * 1000)}",
-            query_text=request.query,
-            metric=metric,
-            threshold=final_threshold,
-            top_k=request.top_k,
-            domain=DomainType.GENERAL # Enum is used by base, but we apply threshold immediately
-        )
         
-        search_result = similarity_service.search(search_req)
-        
-        # Convert similarity results to SearchResult objects
         results = []
-        if search_result and search_result.matches:
-            for match in search_result.matches:
-                # Try to get cached value from cache manager
+        
+        # Use UnifiedIndexManager directly if available (preferred)
+        if index_manager:
+            search_results = index_manager.search(
+                embedding=embedding,
+                k=request.top_k,
+                threshold=final_threshold,
+                domain=domain_str,
+                tenant_id=tenant_id,
+            )
+            
+            for item_id, similarity, entry in search_results:
+                # Get cached value
                 cached_value = None
-                cache_level = "none"
+                cache_level = "index"
                 
-                if cache_manager is not None:
-                    cache_entry = cache_manager.get(f"{tenant_id}:{match.candidate_id}")
+                if cache_manager:
+                    cache_key = f"{tenant_id}:{item_id}" if tenant_id else item_id
+                    cache_entry = cache_manager.get(cache_key)
                     if cache_entry:
                         cached_value = cache_entry[0].response
-                        cache_level = cache_entry[1]
+                        cache_level = cache_entry[1].lower()
                 
                 results.append(SearchResult(
-                    key=match.candidate_id,
-                    similarity=round(match.similarity, 4),
+                    key=item_id,
+                    similarity=round(similarity, 4),
                     value=cached_value,
                     cache_level=cache_level
+                ))
+        
+        # Fallback to CacheManager's semantic search
+        elif cache_manager and hasattr(cache_manager, 'get_semantic_async'):
+            semantic_result = await cache_manager.get_semantic_async(
+                query_text=request.query,
+                tenant_id=tenant_id,
+                domain=domain_str,
+                threshold=final_threshold,
+            )
+            
+            if semantic_result and semantic_result.entry:
+                results.append(SearchResult(
+                    key=semantic_result.entry.query_id,
+                    similarity=round(semantic_result.similarity, 4),
+                    value=semantic_result.entry.response,
+                    cache_level=semantic_result.hit_source.lower()
                 ))
         
         search_time = (time.time() - start_time) * 1000
@@ -121,55 +140,57 @@ async def embedding_search(
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
-    """Generate embedding and find similar cached items."""
-    # Get services from app state
-    embedding_service = http_request.app.state.embedding_service if hasattr(http_request.app.state, 'embedding_service') else None
-    similarity_service = http_request.app.state.similarity_service if hasattr(http_request.app.state, 'similarity_service') else None
-    cache_manager = http_request.app.state.cache_manager if hasattr(http_request.app.state, 'cache_manager') else None
+    """
+    Generate embedding and find similar cached items.
     
-    if embedding_service is None or similarity_service is None:
+    Returns both the generated embedding metadata and similar items
+    from the unified search index.
+    """
+    embedding_service = getattr(http_request.app.state, 'embedding_service', None)
+    index_manager = getattr(http_request.app.state, 'index_manager', None)
+    cache_manager = getattr(http_request.app.state, 'cache_manager', None)
+    
+    if embedding_service is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Embedding or similarity service not available"
+            detail="Embedding service not available"
         )
     
     try:
-        # Generate embedding
         start_time = time.time()
         
+        # Generate embedding
         embedding_record = await embedding_service.embed_text(query)
         embedding = embedding_record.embedding
         embedding_time = (time.time() - start_time) * 1000
         
-        # Search for similar items
-        search_req = SimilarityReq(
-            query_embedding=embedding,
-            query_id=f"embed_{int(time.time() * 1000)}",
-            query_text=query,
-            metric=SimilarityMetric.COSINE,
-            threshold=threshold,
-            top_k=top_k,
-            domain=DomainType.GENERAL
-        )
-        
-        search_result = similarity_service.search(search_req)
-        
-        # Build similar items list
+        # Search unified index
         similar_items = []
-        if search_result and search_result.matches:
-            for match in search_result.matches:
+        
+        if index_manager:
+            search_results = index_manager.search(
+                embedding=embedding,
+                k=top_k,
+                threshold=threshold,
+                tenant_id=tenant_id,
+            )
+            
+            for rank, (item_id, similarity, entry) in enumerate(search_results, 1):
                 cached_value = None
                 
-                if cache_manager is not None:
-                    cache_entry = cache_manager.get(f"{tenant_id}:{match.candidate_id}")
+                if cache_manager:
+                    cache_key = f"{tenant_id}:{item_id}" if tenant_id else item_id
+                    cache_entry = cache_manager.get(cache_key)
                     if cache_entry:
                         cached_value = cache_entry[0].response
                 
                 similar_items.append({
-                    "key": match.candidate_id,
-                    "similarity": round(match.similarity, 4),
+                    "key": item_id,
+                    "similarity": round(similarity, 4),
                     "value": cached_value,
-                    "rank": match.rank
+                    "rank": rank,
+                    "query_text": entry.query_text if entry else None,
+                    "domain": entry.domain if entry else "general",
                 })
         
         search_time = (time.time() - start_time) * 1000
@@ -181,7 +202,8 @@ async def embedding_search(
             "similar_items": similar_items,
             "count": len(similar_items),
             "search_time_ms": round(search_time, 2),
-            "model": embedding_record.model
+            "model": embedding_record.model,
+            "index_available": index_manager is not None,
         }
         
     except Exception as e:
@@ -189,3 +211,24 @@ async def embedding_search(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Embedding search failed: {str(e)}"
         )
+
+
+@router.get("/index/stats")
+async def get_index_stats(
+    http_request: Request = None,
+    current_user: TokenPayload = Depends(get_current_user),
+    tenant_id: str = Depends(get_tenant_id)
+):
+    """Get unified search index statistics."""
+    index_manager = getattr(http_request.app.state, 'index_manager', None)
+    
+    if index_manager is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Index manager not available"
+        )
+    
+    return {
+        "index_stats": index_manager.get_stats(),
+        "tenant_id": tenant_id,
+    }

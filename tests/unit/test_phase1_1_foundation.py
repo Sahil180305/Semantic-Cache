@@ -254,8 +254,12 @@ class TestConfiguration:
         config = SemanticCacheConfig()
         config.validate()  # Should pass with defaults
 
-    def test_config_loader_from_yaml(self):
+    def test_config_loader_from_yaml(self, monkeypatch):
         """Test loading configuration from YAML file."""
+        # Clear environment variables that might override YAML config
+        monkeypatch.delenv("API_HOST", raising=False)
+        monkeypatch.delenv("API_PORT", raising=False)
+        
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create test YAML file
             config_file = Path(tmpdir) / "test_config.yaml"

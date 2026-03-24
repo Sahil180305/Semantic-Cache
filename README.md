@@ -2,135 +2,181 @@
 
 A production-grade semantic cache that sits between LLM-powered applications and backend AI services, reducing latency and cost through intelligent similarity-aware caching.
 
+## 🚀 Quick Start
+
+```bash
+# 1. Start infrastructure
+docker-compose up -d
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Start the API server
+python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+
+# 4. Test it works
+curl http://localhost:8000/health
+```
+
 ## Overview
 
-This project implements a smart caching layer that goes beyond exact-match caching, using semantic similarity to reuse responses for similar queries. It features:
+This project implements a smart caching layer that goes beyond exact-match caching, using semantic similarity to reuse responses for similar queries.
 
-- **Multi-level caching** (in-memory, SSD, disk)
-- **Domain-adaptive similarity thresholds**
-- **Predictive cache warming**
-- **Cost-aware eviction policies**
-- **Multi-tenant isolation**
-- **Real-time monitoring and explainability**
+### Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **3-Tier Caching** | L1 (Memory <1ms) → L2 (Redis 5-10ms) → L3 (PostgreSQL 10-50ms) |
+| **Semantic Matching** | Find similar queries using embeddings & HNSW index |
+| **Domain-Adaptive Thresholds** | Auto-adjusts similarity thresholds per domain |
+| **Cost-Aware Eviction** | Keeps expensive LLM responses longer |
+| **Multi-Tenant Isolation** | Secure tenant separation with quotas |
+| **Predictive Warming** | Pre-caches likely queries |
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Your RAG Application                     │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   Semantic Cache API                         │
+│  ┌───────────┐  ┌─────────────┐  ┌───────────────────────┐  │
+│  │ Embedding │  │   Domain    │  │  Adaptive Thresholds  │  │
+│  │  Service  │  │ Classifier  │  │   & Cost Policy       │  │
+│  └───────────┘  └─────────────┘  └───────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+  ┌──────────┐         ┌──────────┐         ┌──────────┐
+  │ L1 Cache │         │ L2 Cache │         │ L3 Cache │
+  │ (Memory) │         │ (Redis)  │         │(Postgres)│
+  │   <1ms   │         │  5-10ms  │         │ 10-50ms  │
+  │  ~10K    │         │  ~100K   │         │ Millions │
+  └──────────┘         └──────────┘         └──────────┘
+```
+
+## 📖 Documentation
+
+| Document | Description |
+|----------|-------------|
+| **[Usage Guide](./docs/guides/USAGE_GUIDE.md)** | Complete usage guide with RAG integration examples |
+| **[Architecture](./docs/ARCHITECTURE_COMPARISON.md)** | System architecture and design decisions |
+| **[Query Flow](./docs/QUERY_FLOW_EXPLAINED.md)** | How queries flow through the system |
+| **[API Reference](./docs/api/)** | Complete API documentation |
+| **[Setup Guide](./docs/guides/SETUP.md)** | Detailed installation instructions |
+
+## Usage Examples
+
+### Basic Semantic Caching
+
+```python
+import httpx
+
+# Store a query-response pair
+response = httpx.post("http://localhost:8000/api/v1/cache/semantic", json={
+    "query": "What is machine learning?",
+    "response": "Machine learning is a subset of AI...",
+    "domain": "technology"
+})
+
+# Search for similar queries
+response = httpx.post("http://localhost:8000/api/v1/cache/semantic/search", json={
+    "query": "Explain ML to me",
+    "threshold": 0.85
+})
+
+# Returns cached response with 92% similarity match!
+print(response.json())
+# {"hit": true, "similarity": 0.92, "response": "Machine learning is..."}
+```
+
+### RAG Integration
+
+```python
+async def rag_with_cache(query: str, retriever, llm):
+    # 1. Check cache first
+    cache_result = await cache.search(query, threshold=0.85)
+    if cache_result.hit:
+        return cache_result.response  # Fast path: ~5ms
+    
+    # 2. Cache miss - run full RAG pipeline
+    docs = retriever.get_relevant_documents(query)
+    response = llm.generate(query, context=docs)  # Slow path: ~2000ms
+    
+    # 3. Cache for future queries
+    await cache.store(query, response, metadata={"cost": 0.003})
+    
+    return response
+```
+
+See the [Usage Guide](./docs/guides/USAGE_GUIDE.md) for complete examples with LangChain, LlamaIndex, and OpenAI.
+
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check with cache status |
+| `/api/v1/cache/semantic` | POST | Store with semantic indexing |
+| `/api/v1/cache/semantic/search` | POST | Semantic similarity search |
+| `/api/v1/cache/{key}` | GET/PUT/DEL | Exact key operations |
+| `/api/v1/admin/stats` | GET | Cache statistics |
+| `/api/v1/tenant/create` | POST | Create tenant |
 
 ## Project Structure
 
 ```
 semantic-cache/
-├── src/                          # Main source code
-│   ├── core/                     # Core cache engine
-│   ├── cache/                    # Cache implementations (L1, L2, L3)
-│   ├── embedding/                # Embedding service integrations
-│   ├── similarity/               # Similarity matching algorithms
-│   ├── api/                      # FastAPI endpoints
-│   ├── ml/                       # ML models and inference
-│   ├── multi_tenancy/            # Multi-tenant functionality
-│   ├── monitoring/               # Monitoring and metrics
-│   └── utils/                    # Utilities and helpers
-├── tests/                        # Test suites
-│   ├── unit/                     # Unit tests
-│   ├── integration/              # Integration tests
-│   └── performance/              # Performance benchmarks
-├── config/                       # Configuration files
-├── deployment/                   # Deployment artifacts
-│   ├── docker/                   # Docker configurations
-│   ├── kubernetes/               # Kubernetes manifests
-│   └── terraform/                # IaC scripts
-├── docs/                         # Documentation
-│   ├── architecture/             # Architecture docs
-│   ├── api/                      # API documentation
-│   └── guides/                   # Integration guides
-├── monitoring/                   # Monitoring stack configs
-│   ├── prometheus/               # Prometheus configs
-│   └── grafana/                  # Grafana dashboards
-└── scripts/                      # Utility scripts
+├── src/
+│   ├── api/              # FastAPI endpoints & middleware
+│   ├── cache/            # L1 (memory), L2 (Redis), L3 (PostgreSQL)
+│   ├── embedding/        # Embedding service (sentence-transformers)
+│   ├── similarity/       # HNSW index & similarity search
+│   ├── ml/               # Domain classifier, adaptive thresholds
+│   ├── multi_tenancy/    # Tenant isolation & quotas
+│   └── monitoring/       # Prometheus metrics
+├── tests/                # Unit, integration, performance tests
+├── docs/                 # Documentation
+├── monitoring/           # Grafana dashboards, Prometheus config
+└── docker-compose.yml    # Redis, PostgreSQL, monitoring stack
 ```
 
-## Development Roadmap
+## Development Status
 
-### Phase 1: Core Cache (Months 1-4) ✅ COMPLETE
-- Basic semantic cache with Redis + HNSW
-- Embedding service integration
-- Monitoring dashboards
+| Phase | Status | Features |
+|-------|--------|----------|
+| **Phase 1**: Core Cache | ✅ Complete | Redis + HNSW, embeddings, monitoring |
+| **Phase 2**: Multi-Level | ✅ Complete | L1/L2/L3 tiers, eviction policies |
+| **Phase 3**: Intelligence | ✅ Complete | Domain classifier, adaptive thresholds, predictive warming |
+| **Phase 4**: Production | ✅ Complete | Multi-tenancy, security, load testing |
 
-### Phase 2: Multi-Level & Hybrid Search (Months 5-7) ✅ COMPLETE
-- L2 (SSD) and L3 (disk) cache layers
-- Metadata filtering with RedisSearch
-- Eviction policies (LRU, LFU)
-
-### Phase 3: Intelligence Layer ✅ COMPLETE
-- Domain classifier and adaptive thresholds
-- Predictive warming
-- Cost-aware eviction
-
-### Phase 4: Production Hardening ✅ COMPLETE
-- Multi-tenancy with quotas
-- Security headers & rate limiting
-- Load testing (Locust)
-- Fine-tuning pipeline
-
-## Getting Started
-
-### Prerequisites
-- Python 3.10+
-- Docker & Docker Compose
-- Redis (local or containerized)
-- FAISS or HNSWlib
-
-### Installation
+## Testing
 
 ```bash
-# Clone and setup
-cd semantic-cache
-pip install -r requirements.txt
+# Run all tests
+pytest tests/ -v
 
-# Run tests
-pytest tests/
+# Run with coverage
+pytest tests/ --cov=src --cov-report=html
 
-# Start services
-docker-compose up -d
+# Performance tests
+pytest tests/performance/ -v
 ```
 
-See [SETUP.md](./docs/guides/SETUP.md) for detailed setup instructions.
+## Monitoring
 
-## Usage
+Access monitoring dashboards:
+- **Grafana**: http://localhost:3000 (admin/admin)
+- **Prometheus**: http://localhost:9090
 
-### Basic Example
-
-```python
-from src.core.semantic_cache import SemanticCache
-
-# Initialize cache
-cache = SemanticCache(
-    embedding_model="sentence-transformers/all-MiniLM-L6-v2",
-    similarity_threshold=0.85
-)
-
-# Query the cache
-response = cache.query(
-    query_text="What is machine learning?",
-    tenant_id="tenant_123"
-)
-```
-
-See [docs/guides](./docs/guides/) for more examples.
-
-## API Endpoints
-
-| Endpoint | Methods | Description |
-|----------|---------|-------------|
-| `/api/v1/cache` | GET/PUT/DEL/POST | Cache operations (get, put, batch, delete) |
-| `/api/v1/search` | POST | Semantic similarity search and embedding |
-| `/api/v1/admin` | GET/POST/PUT | Admin cache optimization, compression, policies |
-| `/api/v1/tenant`| GET/POST/PUT/DEL | Resource isolation, quotas, and tenant management |
-
-## Architecture
-
-See [docs/architecture](./docs/architecture/) for:
-- High-level system design
-- Component interactions
-- Data flow diagrams
-- Performance characteristics
+Key metrics:
+- Cache hit rate by tier
+- Latency percentiles (p50, p95, p99)
+- Cost savings estimation
+- Query throughput
 
 ## Contributing
 
@@ -139,10 +185,6 @@ See [docs/architecture](./docs/architecture/) for:
 3. Run `pytest` and `black`
 4. Submit a pull request
 
-## Team
-
-See [PROJECT_CONTEXT.md](./PROJECT_CONTEXT.md) for team roles and responsibilities.
-
 ## License
 
 MIT License - See LICENSE file for details
@@ -150,3 +192,7 @@ MIT License - See LICENSE file for details
 ## Contact
 
 For questions or contributions, contact the project team.
+
+---
+
+📚 **[Full Usage Guide →](./docs/guides/USAGE_GUIDE.md)**

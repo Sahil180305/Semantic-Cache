@@ -1,19 +1,22 @@
 """
-Similarity Search Service
+Similarity Search Service (Facade Pattern)
 
-High-level service for semantic similarity search with:
+High-level service for semantic similarity search that delegates to UnifiedIndexManager.
+Provides additional features on top of the unified index:
 - Multi-metric support (cosine, euclidean, inner product, etc.)
-- Domain-adaptive thresholds
-- HNSW in-memory indexing for fast search
-- Query deduplication
+- Query deduplication (fast SHA256 pre-check)
 - Result ranking and scoring
-- Caching and metrics
+- Rich search metrics and analytics
+- Batch search operations
+
+NOTE: This service does NOT maintain its own index. All indexing operations
+are delegated to UnifiedIndexManager for consistency across the system.
 """
 
 import time
 import hashlib
-from typing import List, Dict, Optional, Tuple, Set
-from datetime import datetime
+from typing import List, Dict, Optional, Tuple, Set, Any, TYPE_CHECKING
+from datetime import datetime, timezone
 import logging
 from collections import defaultdict
 
@@ -27,12 +30,15 @@ from src.similarity.base import (
     DomainThresholdConfig,
     SimilarityAlgorithmFactory,
 )
-from src.similarity.index import HNSWIndex
 from src.core.exceptions import (
     SimilarityError,
     CacheError,
 )
 from src.utils.logging import get_logger
+
+# Avoid circular import
+if TYPE_CHECKING:
+    from src.cache.index_manager import UnifiedIndexManager
 
 logger = get_logger(__name__)
 
@@ -87,7 +93,7 @@ class QueryDeduplicator:
             del self.query_cache[oldest_key]
         
         query_hash = self._get_query_hash(text)
-        self.query_cache[query_hash] = (text, datetime.utcnow())
+        self.query_cache[query_hash] = (text, datetime.now(timezone.utc))
     
     def get_stats(self) -> Dict:
         """Get deduplication statistics."""
@@ -163,14 +169,18 @@ class SimilaritySearchMetrics:
 
 class SimilaritySearchService:
     """
-    High-level similarity search service.
+    High-level similarity search service (Facade Pattern).
     
-    Provides semantic similarity search with:
+    This service provides semantic similarity search with:
     - Multiple similarity metrics
     - Domain-specific thresholds
-    - HNSW indexing
     - Query deduplication
     - Result ranking
+    - Rich metrics and analytics
+    - Batch search operations
+    
+    IMPORTANT: This service delegates ALL indexing operations to UnifiedIndexManager.
+    It does NOT maintain its own index. This ensures consistency across the system.
     """
     
     def __init__(
@@ -180,6 +190,7 @@ class SimilaritySearchService:
         threshold_config: Optional[DomainThresholdConfig] = None,
         enable_deduplication: bool = True,
         index_config: Optional[Dict] = None,
+        index_manager: Optional['UnifiedIndexManager'] = None,
     ):
         """
         Initialize similarity search service.
@@ -187,51 +198,93 @@ class SimilaritySearchService:
         Args:
             metric: Similarity metric to use
             dimension: Embedding dimension
-            threshold_config: Domain threshold configuration
+            threshold_config: Domain threshold configuration (deprecated - uses index_manager)
             enable_deduplication: Whether to enable query deduplication
-            index_config: HNSW index configuration
+            index_config: HNSW index configuration (deprecated - uses index_manager)
+            index_manager: UnifiedIndexManager instance for all index operations
         """
         self.metric = metric
         self.dimension = dimension
-        self.threshold_config = threshold_config or DomainThresholdConfig()
         self.enable_deduplication = enable_deduplication
         
-        # Get similarity algorithm
+        # Get similarity algorithm (for reference)
         self.similarity_algorithm = SimilarityAlgorithmFactory.get_algorithm(metric)
         
-        # Initialize index
-        index_cfg = index_config or {}
-        self.index = HNSWIndex(
-            dimension=dimension,
-            similarity_algorithm=self.similarity_algorithm,
-            m=index_cfg.get("m", 16),
-            ef=index_cfg.get("ef", 200),
-            max_m=index_cfg.get("max_m", 48),
-        )
+        # Unified index manager - the single source of truth
+        self._index_manager: Optional['UnifiedIndexManager'] = index_manager
         
-        # Query deduplication
+        # Fallback threshold config (used only if index_manager not available)
+        self._fallback_threshold_config = threshold_config or DomainThresholdConfig()
+        
+        # Query deduplication (value-add feature)
         self.deduplicator = QueryDeduplicator() if enable_deduplication else None
         
-        # Metrics
+        # Metrics (value-add feature)
         self.metrics = SimilaritySearchMetrics()
         
-        # Result cache
+        # Result cache (for repeated identical queries)
         self.result_cache: Dict[str, SimilaritySearchResult] = {}
         self.cache_stats = {"hits": 0, "misses": 0}
+        
+        logger.info(
+            f"SimilaritySearchService initialized: metric={metric.value}, "
+            f"dimension={dimension}, index_manager={'connected' if index_manager else 'not set'}"
+        )
+    
+    def set_index_manager(self, index_manager: 'UnifiedIndexManager') -> None:
+        """
+        Set the unified index manager for index operations.
+        
+        Args:
+            index_manager: UnifiedIndexManager instance
+        """
+        self._index_manager = index_manager
+        logger.info("Index manager connected to SimilaritySearchService")
+    
+    @property
+    def index_manager(self) -> Optional['UnifiedIndexManager']:
+        """Get the current index manager."""
+        return self._index_manager
+    
+    @property
+    def is_ready(self) -> bool:
+        """Check if service is ready (index manager connected)."""
+        return self._index_manager is not None
+    
+    def _get_threshold(self, domain: DomainType) -> float:
+        """Get threshold from index manager or fallback config."""
+        if self._index_manager:
+            return self._index_manager.get_threshold(domain.value)
+        return self._fallback_threshold_config.get_threshold(domain)
+    
+    def _get_index_size(self) -> int:
+        """Get current index size."""
+        if self._index_manager:
+            return self._index_manager.size()
+        return 0
     
     def add_to_index(
         self,
         item_id: str,
         embedding: List[float],
         metadata: Optional[Dict] = None,
+        query_text: str = "",
+        tenant_id: Optional[str] = None,
+        domain: str = "general",
     ) -> None:
         """
-        Add item to similarity search index.
+        Add item to similarity search index via UnifiedIndexManager.
         
         Args:
             item_id: Unique identifier
             embedding: Embedding vector
             metadata: Optional metadata
+            query_text: Original query text (for dedup and exact matching)
+            tenant_id: Tenant ID for multi-tenancy
+            domain: Domain type for threshold selection
+            
+        Raises:
+            SimilarityError: If index_manager not set or indexing fails
         """
         if len(embedding) != self.dimension:
             raise SimilarityError(
@@ -239,21 +292,49 @@ class SimilaritySearchService:
                 error_code="DIMENSION_MISMATCH"
             )
         
+        if not self._index_manager:
+            raise SimilarityError(
+                "Index manager not configured. Call set_index_manager() first.",
+                error_code="INDEX_NOT_CONFIGURED"
+            )
+        
         try:
-            self.index.insert(item_id, embedding, metadata)
-            logger.debug(f"Added item {item_id} to similarity index")
+            success = self._index_manager.add(
+                item_id=item_id,
+                embedding=embedding,
+                query_text=query_text,
+                tenant_id=tenant_id,
+                domain=domain,
+                metadata=metadata,
+            )
+            
+            if success:
+                logger.debug(f"Added item {item_id} to unified index via SimilaritySearchService")
+            else:
+                raise SimilarityError(
+                    f"Failed to add item {item_id} to index",
+                    error_code="INDEXING_FAILED"
+                )
+                
+        except SimilarityError:
+            raise
         except Exception as e:
             raise SimilarityError(
                 f"Failed to add item to index: {str(e)}",
                 error_code="INDEXING_ERROR"
             )
     
-    def search(self, request: SimilaritySearchRequest) -> SimilaritySearchResult:
+    def search(
+        self,
+        request: SimilaritySearchRequest,
+        tenant_id: Optional[str] = None,
+    ) -> SimilaritySearchResult:
         """
-        Perform similarity search.
+        Perform similarity search via UnifiedIndexManager.
         
         Args:
             request: Search request with query embedding and parameters
+            tenant_id: Tenant ID for multi-tenancy filtering
             
         Returns:
             SimilaritySearchResult with ranked matches
@@ -267,32 +348,43 @@ class SimilaritySearchService:
                 error_code="QUERY_DIMENSION_MISMATCH"
             )
         
+        if not self._index_manager:
+            raise SimilarityError(
+                "Index manager not configured. Call set_index_manager() first.",
+                error_code="INDEX_NOT_CONFIGURED"
+            )
+        
         start_time = time.time()
         is_cached = False
         is_deduped = False
         
-        # Check for query deduplication
+        # Check for query deduplication (fast pre-check)
         if self.enable_deduplication and request.query_text:
             if self.deduplicator.is_duplicate(request.query_text):
                 is_deduped = True
                 logger.debug(f"Query {request.query_id} is deduplicated")
         
         # Get similarity threshold
-        threshold = request.threshold or self.threshold_config.get_threshold(request.domain)
+        threshold = request.threshold or self._get_threshold(request.domain)
         
         try:
-            # Search index
-            search_results = self.index.search(
-                request.query_embedding,
+            # Delegate search to UnifiedIndexManager
+            search_results = self._index_manager.search(
+                embedding=request.query_embedding,
                 k=request.top_k,
-                ef=request.metadata.get("ef") if request.metadata else None,
+                threshold=request.min_score,  # Use min_score for initial filtering
+                domain=request.domain.value if hasattr(request.domain, 'value') else str(request.domain),
+                tenant_id=tenant_id,
             )
             
-            # Convert to SimilarityScore objects
+            # Convert to SimilarityScore objects with ranking
             matches: List[SimilarityScore] = []
-            for rank, (item_id, similarity) in enumerate(search_results, 1):
+            for rank, (item_id, similarity, entry) in enumerate(search_results, 1):
                 if similarity >= request.min_score:
                     is_match = similarity >= threshold
+                    
+                    # Get metadata from entry
+                    entry_metadata = entry.metadata if entry else {}
                     
                     score = SimilarityScore(
                         query_id=request.query_id,
@@ -302,7 +394,7 @@ class SimilaritySearchService:
                         is_match=is_match,
                         threshold_used=threshold,
                         rank=rank,
-                        metadata=self.index.metadata.get(item_id),
+                        metadata=entry_metadata,
                     )
                     matches.append(score)
             
@@ -312,17 +404,17 @@ class SimilaritySearchService:
             result = SimilaritySearchResult(
                 query_id=request.query_id,
                 matches=matches,
-                total_candidates=len(self.index.data),
+                total_candidates=self._get_index_size(),
                 search_time_ms=search_time_ms,
                 metric=request.metric,
                 threshold=threshold,
                 is_cached=is_cached,
             )
             
-            # Record metrics
+            # Record metrics (value-add analytics)
             num_matches = sum(1 for m in matches if m.is_match)
             self.metrics.record_search(
-                num_candidates=len(self.index.data),
+                num_candidates=self._get_index_size(),
                 num_matches=num_matches,
                 search_time_ms=search_time_ms,
                 metric=request.metric,
@@ -336,6 +428,8 @@ class SimilaritySearchService:
             
             return result
             
+        except SimilarityError:
+            raise
         except Exception as e:
             raise SimilarityError(
                 f"Similarity search failed: {str(e)}",
@@ -345,12 +439,14 @@ class SimilaritySearchService:
     def batch_search(
         self,
         requests: List[SimilaritySearchRequest],
+        tenant_id: Optional[str] = None,
     ) -> List[SimilaritySearchResult]:
         """
         Perform batch similarity searches.
         
         Args:
             requests: List of search requests
+            tenant_id: Tenant ID for multi-tenancy filtering
             
         Returns:
             List of search results in same order as requests
@@ -358,7 +454,7 @@ class SimilaritySearchService:
         results = []
         for request in requests:
             try:
-                result = self.search(request)
+                result = self.search(request, tenant_id=tenant_id)
                 results.append(result)
             except SimilarityError as e:
                 logger.error(f"Batch search failed for query {request.query_id}: {e.message}")
@@ -366,23 +462,27 @@ class SimilaritySearchService:
                 results.append(SimilaritySearchResult(
                     query_id=request.query_id,
                     matches=[],
-                    total_candidates=len(self.index.data),
+                    total_candidates=self._get_index_size(),
                     search_time_ms=0.0,
                     metric=request.metric,
-                    threshold=self.threshold_config.get_threshold(request.domain),
+                    threshold=self._get_threshold(request.domain),
                 ))
         
         return results
     
     def get_metrics(self) -> Dict:
         """Get comprehensive service metrics."""
+        index_stats = {}
+        if self._index_manager:
+            index_stats = self._index_manager.get_stats()
+        
         return {
             "search_metrics": self.metrics.get_stats(),
             "deduplication": (
                 self.deduplicator.get_stats() if self.enable_deduplication else None
             ),
-            "index": self.index.get_stats(),
-            "threshold_config": self.threshold_config.to_dict(),
+            "index": index_stats,
+            "index_manager_connected": self._index_manager is not None,
         }
     
     def reset_metrics(self) -> None:
@@ -391,17 +491,42 @@ class SimilaritySearchService:
         if self.deduplicator:
             self.deduplicator.dedup_stats = {"total_checks": 0, "duplicates_found": 0}
     
-    def clear_index(self) -> None:
-        """Clear all indexed items."""
-        self.index.data.clear()
-        self.index.metadata.clear()
-        self.index.graph.clear()
-        self.index.node_id_map.clear()
-        self.index.node_reverse_map.clear()
-        self.index.node_levels.clear()
-        self.index.entry_point = None
-        self.index.next_node_id = 0
-        logger.info("Similarity search index cleared")
+    def clear_index(self, tenant_id: Optional[str] = None) -> None:
+        """
+        Clear items from the unified index.
+        
+        Args:
+            tenant_id: If provided, only clear items for this tenant
+        """
+        if not self._index_manager:
+            logger.warning("Index manager not configured, nothing to clear")
+            return
+            
+        count = self._index_manager.clear(tenant_id)
+        logger.info(f"Cleared {count} items from unified index via SimilaritySearchService")
+    
+    def delete_from_index(self, item_id: str, tenant_id: Optional[str] = None) -> bool:
+        """
+        Delete a specific item from the unified index.
+        
+        Args:
+            item_id: Item ID to delete
+            tenant_id: Tenant ID for the item
+            
+        Returns:
+            True if deleted, False if not found
+        """
+        if not self._index_manager:
+            logger.warning("Index manager not configured")
+            return False
+            
+        return self._index_manager.delete(item_id, tenant_id)
+    
+    def contains(self, item_id: str, tenant_id: Optional[str] = None) -> bool:
+        """Check if item exists in the unified index."""
+        if not self._index_manager:
+            return False
+        return self._index_manager.contains(item_id, tenant_id)
     
     def __repr__(self) -> str:
         """String representation."""
@@ -409,6 +534,7 @@ class SimilaritySearchService:
             f"SimilaritySearchService("
             f"metric={self.metric.value}, "
             f"dimension={self.dimension}, "
-            f"items={len(self.index.data)}"
+            f"index_manager={'connected' if self._index_manager else 'not set'}, "
+            f"items={self._get_index_size()}"
             f")"
         )

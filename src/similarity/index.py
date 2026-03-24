@@ -183,8 +183,12 @@ class HNSWIndex:
         if self.entry_point is None:
             return []
         
+        # Compute initial distance to entry point
+        entry_embedding = self.data[self.node_reverse_map[self.entry_point]]
+        entry_distance = self._compute_distance(query, entry_embedding)
+        
         # Search from top level to 0
-        nearest = [(float('inf'), self.entry_point)]
+        nearest = [(entry_distance, self.entry_point)]
         
         entry_level = self.node_levels.get(self.entry_point, 0)
         

@@ -8,6 +8,16 @@ This directory contains comprehensive usage guides for all Phase 1 components of
 
 ---
 
+## 🚀 Start Here
+
+| Guide | Description | Audience |
+|-------|-------------|----------|
+| **[USAGE_GUIDE.md](./USAGE_GUIDE.md)** | Complete application guide with RAG integration | All users |
+| **[SETUP.md](./SETUP.md)** | Installation and configuration | New users |
+| **[QUICK_REFERENCE.md](./QUICK_REFERENCE.md)** | API cheat sheet | Developers |
+
+---
+
 ## Quick Navigation
 
 ### Core Components
