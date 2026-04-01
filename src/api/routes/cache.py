@@ -2,7 +2,9 @@
 
 import time
 import json
+import asyncio
 from fastapi import APIRouter, Depends, Path, Query, Request, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Any, List
 import sys
@@ -18,6 +20,7 @@ from ..schemas import (
 from ..auth.jwt import get_current_user, get_tenant_id, TokenPayload
 from ..middleware.error import CacheNotFoundException
 from src.cache.base import CacheEntry
+from src.cache.streaming import StreamingCache
 
 router = APIRouter()
 
@@ -561,3 +564,42 @@ async def get_semantic_stats(
         "cache": combined_stats,
         "tenant_id": tenant_id
     }
+@router.post("/semantic/stream")
+async def semantic_cache_stream(
+    body: SemanticCacheRequest,
+    request: Request = None,
+    current_user: TokenPayload = Depends(get_current_user),
+    tenant_id: str = Depends(get_tenant_id)
+):
+    """
+    Look up stream cache; if missed, pretend to generate and cache stream tokens.
+    """
+    cache_manager = getattr(request.app.state, 'cache_manager', None)
+    if not cache_manager:
+        raise HTTPException(status_code=503, detail="Cache disabled")
+        
+    stream_cache = StreamingCache(cache_manager)
+    query_key = body.query
+    
+    # Try hit
+    cached_stream = await stream_cache.get_stream(query_key)
+    if cached_stream:
+        return StreamingResponse(
+            cached_stream, 
+            media_type="text/event-stream",
+            headers={"X-Cache-Status": "HIT"}
+        )
+        
+    # Miss -> generate
+    async def generate_mock_stream():
+        tokens = ["This", " is", " a", " generated", " stream", " replaying", " live."]
+        for t in tokens:
+            yield t
+            await asyncio.sleep(0.1)
+            
+    generator = stream_cache.stream_and_cache(query_key, generate_mock_stream(), body.metadata or {})
+    return StreamingResponse(
+        generator, 
+        media_type="text/event-stream",
+        headers={"X-Cache-Status": "MISS"}
+    )

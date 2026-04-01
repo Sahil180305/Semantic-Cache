@@ -175,6 +175,10 @@ class CacheManager:
         self._query_normalizer = QueryNormalizer()
         self._intent_detector = RuleBasedIntentDetector()
         
+        from src.core.circuit_breaker import CircuitBreaker
+        self.embedding_breaker = CircuitBreaker(name="embedding_service", failure_threshold=5, recovery_timeout=30)
+        self.compute_breaker = CircuitBreaker(name="compute_service", failure_threshold=5, recovery_timeout=60)
+        
         # Semantic metrics
         self._semantic_metrics = {
             "semantic_hits": 0,
@@ -781,7 +785,9 @@ class CacheManager:
             normalized_query = self._query_normalizer.normalize(query_text)
             
             # Generate embedding
-            embedding_record = await self._embedding_service.embed_text(normalized_query)
+            async def get_emb():
+                return await self._embedding_service.embed_text(normalized_query)
+            embedding_record = await self.embedding_breaker.call(get_emb)
             self._semantic_metrics["embeddings_generated"] += 1
             
             # Search with embedding
@@ -973,7 +979,9 @@ class CacheManager:
             domain = domain or "general"
             
             # Generate embedding
-            embedding_record = await self._embedding_service.embed_text(normalized_query)
+            async def get_emb():
+                return await self._embedding_service.embed_text(normalized_query)
+            embedding_record = await self.embedding_breaker.call(get_emb)
             self._semantic_metrics["embeddings_generated"] += 1
             
             # Store with embedding
@@ -997,6 +1005,8 @@ class CacheManager:
         domain: Optional[str] = None,
         threshold: Optional[float] = None,
         cache_result: bool = True,
+        ttl_seconds: Optional[int] = None,
+        stale_multiplier: float = 2.0,
     ) -> Tuple[Any, bool, float]:
         """
         Get cached response or compute and cache if not found.
@@ -1028,19 +1038,55 @@ class CacheManager:
             threshold=threshold,
         )
         
+        import asyncio
+        
         if result and result.entry:
-            # Cache hit
-            logger.info(
-                f"Cache hit: similarity={result.similarity:.3f}, "
-                f"source={result.hit_source}"
-            )
-            return (result.entry.response, True, result.similarity)
+            entry = result.entry
+            
+            # Check SWR thresholds
+            if not entry.is_expired(ttl_seconds):
+                # Fresh Cache hit
+                logger.info(
+                    f"Cache hit: similarity={result.similarity:.3f}, "
+                    f"source={result.hit_source}"
+                )
+                return (entry.response, True, result.similarity)
+            else:
+                if entry.is_stale(ttl_seconds, stale_multiplier):
+                    logger.info("Stale Cache Hit - triggering background refresh")
+                    if not entry.is_refreshing:
+                        entry.is_refreshing = True
+                        
+                        async def background_refresh():
+                            try:
+                                new_response = await compute_fn(query_text)
+                                if cache_result:
+                                    await self.put_semantic_async(
+                                        query_text=query_text,
+                                        response=new_response,
+                                        tenant_id=tenant_id,
+                                        domain=domain,
+                                        metadata={"compute_time_ms": (time.time() - start_time) * 1000},
+                                    )
+                            except Exception as e:
+                                logger.error(f"Background refresh failed: {e}")
+                            finally:
+                                entry.is_refreshing = False
+                                
+                        asyncio.create_task(background_refresh())
+                    
+                    return (entry.response, True, result.similarity)
+                else:
+                    # Too old! Falls through to compute
+                    pass
         
         # Cache miss - compute response
         logger.info("Cache miss, computing response...")
         
         try:
-            response = await compute_fn(query_text)
+            async def run_compute():
+                return await compute_fn(query_text)
+            response = await self.compute_breaker.call(run_compute)
             
             # Cache the result
             if cache_result:
