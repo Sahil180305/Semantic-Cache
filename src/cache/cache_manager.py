@@ -26,6 +26,7 @@ from src.cache.l1_cache import L1Cache
 from src.cache.l2_cache import L2Cache, L2CacheMetrics
 from src.cache.l3_cache import L3Cache, L3CacheMetrics
 from src.cache.redis_config import RedisConfig
+from src.ml.query_parser import QueryNormalizer, RuleBasedIntentDetector, MultiIntentQuery, SubQuery
 
 
 logger = logging.getLogger(__name__)
@@ -171,6 +172,8 @@ class CacheManager:
         self._embedding_service = embedding_service
         self._domain_classifier = domain_classifier
         self._threshold_manager = threshold_manager
+        self._query_normalizer = QueryNormalizer()
+        self._intent_detector = RuleBasedIntentDetector()
         
         # Semantic metrics
         self._semantic_metrics = {
@@ -774,13 +777,16 @@ class CacheManager:
             return None
         
         try:
+            # Query normalization
+            normalized_query = self._query_normalizer.normalize(query_text)
+            
             # Generate embedding
-            embedding_record = await self._embedding_service.embed_text(query_text)
+            embedding_record = await self._embedding_service.embed_text(normalized_query)
             self._semantic_metrics["embeddings_generated"] += 1
             
             # Search with embedding
             return self.get_semantic(
-                query_text=query_text,
+                query_text=normalized_query,
                 embedding=embedding_record.embedding,
                 tenant_id=tenant_id,
                 domain=domain,
@@ -789,6 +795,77 @@ class CacheManager:
         except Exception as e:
             logger.error(f"Async semantic search failed: {e}")
             return None
+
+    async def get_semantic_multi_async(
+        self,
+        query_text: str,
+        tenant_id: Optional[str] = None,
+        domain: Optional[str] = None,
+        threshold: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Decomposes query into multiple intents and searches for each.
+        Returns a dict of sub_queries matched, syntesised response (if all hit), etc.
+        """
+        # Normalize
+        normalized_query = self._query_normalizer.normalize(query_text)
+        
+        # Decompose
+        multi_intent = self._intent_detector.decompose(normalized_query)
+        
+        results = {
+            "original_query": query_text,
+            "normalized_query": normalized_query,
+            "sub_queries": [],
+            "all_hit": True,
+            "synthesized_response": None,
+            "hit_ratio": 0.0
+        }
+        
+        if len(multi_intent.sub_queries) <= 1:
+            # Fall back to normal search
+            res = await self.get_semantic_async(query_text, tenant_id, domain, threshold)
+            if res and res.entry:
+                results["sub_queries"].append({
+                    "id": multi_intent.sub_queries[0].id if multi_intent.sub_queries else "sq_1",
+                    "text": normalized_query,
+                    "hit": True,
+                    "response": res.entry.response
+                })
+                results["synthesized_response"] = res.entry.response
+                results["hit_ratio"] = 1.0
+            else:
+                results["all_hit"] = False
+            return results
+            
+        hits = 0
+        responses = []
+        for sq in multi_intent.sub_queries:
+            sq_res = await self.get_semantic_async(sq.text, tenant_id, domain, threshold)
+            hit = sq_res is not None and sq_res.entry is not None
+            if hit:
+                hits += 1
+                responses.append(sq_res.entry.response)
+                results["sub_queries"].append({
+                    "id": sq.id,
+                    "text": sq.text,
+                    "hit": True,
+                    "response": sq_res.entry.response
+                })
+            else:
+                results["all_hit"] = False
+                results["sub_queries"].append({
+                    "id": sq.id,
+                    "text": sq.text,
+                    "hit": False,
+                    "response": None
+                })
+                
+        results["hit_ratio"] = hits / len(multi_intent.sub_queries)
+        if results["all_hit"]:
+            results["synthesized_response"] = self._intent_detector.synthesize(normalized_query, [str(r) for r in responses])
+            
+        return results
     
     def put_semantic(
         self,
@@ -887,18 +964,21 @@ class CacheManager:
             return False
         
         try:
+            # Query normalization
+            normalized_query = self._query_normalizer.normalize(query_text)
+
             # Auto-detect domain
             if domain is None and self._domain_classifier:
-                domain = self._domain_classifier.classify(query_text)
+                domain = self._domain_classifier.classify(normalized_query)
             domain = domain or "general"
             
             # Generate embedding
-            embedding_record = await self._embedding_service.embed_text(query_text)
+            embedding_record = await self._embedding_service.embed_text(normalized_query)
             self._semantic_metrics["embeddings_generated"] += 1
             
             # Store with embedding
             return self.put_semantic(
-                query_text=query_text,
+                query_text=normalized_query,
                 embedding=embedding_record.embedding,
                 response=response,
                 tenant_id=tenant_id,

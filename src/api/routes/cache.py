@@ -49,6 +49,23 @@ class SemanticCacheResponse(BaseModel):
     embedding_generated: bool = False
 
 
+class SubQueryResponse(BaseModel):
+    id: str
+    text: str
+    hit: bool
+    response: Optional[Any]
+
+class SemanticCacheMultiResponse(BaseModel):
+    """Response from multi-intent semantic cache operations."""
+    query: str
+    normalized_query: str
+    sub_queries: List[SubQueryResponse]
+    all_hit: bool
+    synthesized_response: Optional[Any]
+    hit_ratio: float
+    latency_ms: float = 0.0
+
+
 class SemanticGetOrComputeRequest(BaseModel):
     """Request for get-or-compute pattern."""
     query: str = Field(..., description="Query text")
@@ -472,6 +489,54 @@ async def semantic_cache_search(
         embedding_generated=True
     )
 
+
+@router.post("/semantic/multi/search", response_model=SemanticCacheMultiResponse)
+async def semantic_cache_multi_search(
+    body: SemanticCacheRequest,
+    request: Request = None,
+    current_user: TokenPayload = Depends(get_current_user),
+    tenant_id: str = Depends(get_tenant_id)
+):
+    """
+    Search cache utilizing automatic query decomposition for multi-intent queries.
+    """
+    cache_manager = request.app.state.cache_manager if hasattr(request.app.state, 'cache_manager') else None
+    
+    if cache_manager is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Cache manager not available"
+        )
+    
+    start_time = time.time()
+    
+    result = await cache_manager.get_semantic_multi_async(
+        query_text=body.query,
+        tenant_id=tenant_id,
+        domain=body.domain,
+        threshold=body.threshold,
+    )
+    
+    latency_ms = (time.time() - start_time) * 1000
+    
+    sub_queries = [
+        SubQueryResponse(
+            id=sq["id"],
+            text=sq["text"],
+            hit=sq["hit"],
+            response=sq["response"]
+        ) for sq in result["sub_queries"]
+    ]
+    
+    return SemanticCacheMultiResponse(
+        query=result["original_query"],
+        normalized_query=result["normalized_query"],
+        sub_queries=sub_queries,
+        all_hit=result["all_hit"],
+        synthesized_response=result["synthesized_response"],
+        hit_ratio=result["hit_ratio"],
+        latency_ms=round(latency_ms, 2)
+    )
 
 @router.get("/semantic/stats")
 async def get_semantic_stats(
