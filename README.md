@@ -32,41 +32,53 @@ This project implements a smart caching layer that goes beyond exact-match cachi
 | **Cost-Aware Eviction** | Keeps expensive LLM responses longer |
 | **Multi-Tenant Isolation** | Secure tenant separation with quotas |
 | **Predictive Warming** | Pre-caches likely queries |
+| **Query Normalization** | Canonicalize queries before embedding for higher hit rates |
+| **Multi-Intent Detection** | Decompose complex queries into atomic sub-queries |
+| **Stale-While-Revalidate** | Serve stale entries instantly while refreshing in the background |
+| **Streaming Response Cache** | Cache and replay LLM token streams with accurate timing |
+| **Analytics API** | Real-time and historical performance metrics via REST & WebSocket |
+| **Circuit Breaker** | Protect embedding/LLM services with CLOSED → OPEN → HALF-OPEN states |
+| **Context-Aware Caching** | Route conversational queries through a smart context-hash cache |
 
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Your RAG Application                     │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Semantic Cache API                         │
-│  ┌───────────┐  ┌─────────────┐  ┌───────────────────────┐  │
-│  │ Embedding │  │   Domain    │  │  Adaptive Thresholds  │  │
-│  │  Service  │  │ Classifier  │  │   & Cost Policy       │  │
-│  └───────────┘  └─────────────┘  └───────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        ▼                     ▼                     ▼
-  ┌──────────┐         ┌──────────┐         ┌──────────┐
-  │ L1 Cache │         │ L2 Cache │         │ L3 Cache │
-  │ (Memory) │         │ (Redis)  │         │(Postgres)│
-  │   <1ms   │         │  5-10ms  │         │ 10-50ms  │
-  │  ~10K    │         │  ~100K   │         │ Millions │
-  └──────────┘         └──────────┘         └──────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                     Your Application / Chatbot                │
+└───────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌───────────────────────────────────────────────────────────────┐
+│                      SmartCacheRouter                         │
+│   ┌──────────────────┐      ┌─────────────────────────────┐   │
+│   │  ContextAnalyzer │      │      QueryNormalizer         │   │
+│   │  (stateless vs   │      │  + Multi-Intent Detector    │   │
+│   │   contextual)    │      │  + Circuit Breaker          │   │
+│   └──────────────────┘      └─────────────────────────────┘   │
+└───────────────────────────────────────────────────────────────┘
+          │                                │
+          ▼                                ▼
+┌──────────────────┐            ┌──────────────────────┐
+│  Semantic Cache  │            │  Context-Aware Cache │
+│  (stateless q.)  │            │  (conversational q.) │
+└──────────────────┘            └──────────────────────┘
+                    \          /
+                     ▼        ▼
+      ┌──────────┐  ┌──────────┐  ┌──────────┐
+      │ L1 Cache │  │ L2 Cache │  │ L3 Cache │
+      │ (Memory) │  │ (Redis)  │  │(Postgres)│
+      │   <1ms   │  │  5-10ms  │  │ 10-50ms  │
+      └──────────┘  └──────────┘  └──────────┘
 ```
 
 ## 📖 Documentation
 
 | Document | Description |
-|----------|-------------|
+|----------|-----------|
+| **[Feature Reference](./docs/FEATURES.md)** | All features: SWR, Streaming, Analytics, Circuit Breaker, Context-Aware Routing |
 | **[Usage Guide](./docs/guides/USAGE_GUIDE.md)** | Complete usage guide with RAG integration examples |
 | **[Architecture](./docs/ARCHITECTURE_COMPARISON.md)** | System architecture and design decisions |
 | **[Query Flow](./docs/QUERY_FLOW_EXPLAINED.md)** | How queries flow through the system |
-| **[API Reference](./docs/api/)** | Complete API documentation |
 | **[Setup Guide](./docs/guides/SETUP.md)** | Detailed installation instructions |
 
 ## Usage Examples
@@ -117,13 +129,33 @@ See the [Usage Guide](./docs/guides/USAGE_GUIDE.md) for complete examples with L
 
 ## API Endpoints
 
+### Core Cache
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check with cache status |
 | `/api/v1/cache/semantic` | POST | Store with semantic indexing |
 | `/api/v1/cache/semantic/search` | POST | Semantic similarity search |
+| `/api/v1/cache/semantic/multi/search` | POST | Multi-intent query decomposition |
 | `/api/v1/cache/{key}` | GET/PUT/DEL | Exact key operations |
-| `/api/v1/admin/stats` | GET | Cache statistics |
+
+### Conversational / Streaming
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/cache/chat` | POST | Smart context-aware routing (sets `X-Conversation-Id` / `X-Conversation-History` headers) |
+| `/api/v1/cache/semantic/stream` | POST | SSE token streaming with cache replay |
+
+### Analytics
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/metrics/realtime` | GET | Current in-memory cache hit rates |
+| `/api/v1/metrics/historical` | GET | Aggregated time-series stats (Postgres `DATE_TRUNC`) |
+| `/api/v1/insights/top-queries` | GET | Top cache-hit queries by frequency |
+| `/ws/realtime` | WebSocket | Push live metrics every 5 seconds |
+
+### Admin & Tenant
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/admin/stats` | GET | Full cache statistics |
 | `/api/v1/tenant/create` | POST | Create tenant |
 
 ## Project Structure
@@ -131,27 +163,47 @@ See the [Usage Guide](./docs/guides/USAGE_GUIDE.md) for complete examples with L
 ```
 semantic-cache/
 ├── src/
-│   ├── api/              # FastAPI endpoints & middleware
-│   ├── cache/            # L1 (memory), L2 (Redis), L3 (PostgreSQL)
-│   ├── embedding/        # Embedding service (sentence-transformers)
-│   ├── similarity/       # HNSW index & similarity search
-│   ├── ml/               # Domain classifier, adaptive thresholds
-│   ├── multi_tenancy/    # Tenant isolation & quotas
-│   └── monitoring/       # Prometheus metrics
-├── tests/                # Unit, integration, performance tests
-├── docs/                 # Documentation
-├── monitoring/           # Grafana dashboards, Prometheus config
-└── docker-compose.yml    # Redis, PostgreSQL, monitoring stack
+│   ├── api/
+│   │   └── routes/
+│   │       ├── cache.py          # All cache + chat + stream endpoints
+│   │       └── analytics.py      # Metrics & WebSocket analytics endpoints
+│   ├── cache/
+│   │   ├── cache_manager.py      # Tiered cache orchestrator (L1→L2→L3) + SWR + Circuit Breaker
+│   │   ├── base.py               # CacheEntry, CacheMetrics, is_stale()
+│   │   ├── context.py            # ContextAnalyzer, ContextAwareCache, SmartCacheRouter
+│   │   ├── streaming.py          # StreamingCache: stream_and_cache() + get_stream()
+│   │   ├── l1_cache.py           # In-memory LRU/LFU
+│   │   ├── l2_cache.py           # Redis cache tier
+│   │   └── l3_cache.py           # PostgreSQL + pgvector
+│   ├── core/
+│   │   └── circuit_breaker.py    # CircuitBreaker (CLOSED/OPEN/HALF_OPEN)
+│   ├── ml/
+│   │   └── query_parser.py       # QueryNormalizer + RuleBasedIntentDetector
+│   ├── monitoring/
+│   │   └── analytics.py          # AnalyticsCollector (Redis Streams → Postgres)
+│   ├── embedding/                # Embedding service (sentence-transformers)
+│   ├── similarity/               # HNSW index & similarity search
+│   └── multi_tenancy/            # Tenant isolation & quotas
+├── tests/
+│   ├── test_multi_intent.py      # Multi-intent detection tests
+│   └── ...
+├── docs/
+│   └── FEATURES.md               # Detailed feature documentation
+├── monitoring/                   # Grafana dashboards, Prometheus config
+└── docker-compose.yml
 ```
 
 ## Development Status
 
 | Phase | Status | Features |
-|-------|--------|----------|
+|-------|--------|---------|
 | **Phase 1**: Core Cache | ✅ Complete | Redis + HNSW, embeddings, monitoring |
 | **Phase 2**: Multi-Level | ✅ Complete | L1/L2/L3 tiers, eviction policies |
 | **Phase 3**: Intelligence | ✅ Complete | Domain classifier, adaptive thresholds, predictive warming |
 | **Phase 4**: Production | ✅ Complete | Multi-tenancy, security, load testing |
+| **Phase 5**: Semantic Enhancement | ✅ Complete | Query normalization, multi-intent detection |
+| **Phase 6**: Production Resilience | ✅ Complete | SWR, Streaming, Analytics API, Circuit Breaker |
+| **Phase 7**: Context-Aware Routing | ✅ Complete | Smart router, conversational caching, `/chat` endpoint |
 
 ## Testing
 

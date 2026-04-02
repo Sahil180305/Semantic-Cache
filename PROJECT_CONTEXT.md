@@ -2,13 +2,13 @@
 
 This file documents the complete project structure and context for the Semantic Caching Layer initiative.
 
-**Project Status:** ✅ Phase 4 COMPLETE (All phases done)  
-**Phase 1:** ✅ 100% COMPLETE (307+ tests passing)  
-**Phase 2:** ✅ 100% COMPLETE (24/24 endpoints, 330+ tests)  
-**Phase 3:** ✅ COMPLETE (Production Hardening)  
-**Phase 4:** ✅ COMPLETE (Intelligence Layer)  
+**Project Status:** ✅ Phase 7 COMPLETE  
+**Phase 1–4:** ✅ 100% COMPLETE (Core cache, API, intelligence, production hardening)  
+**Phase 5:** ✅ COMPLETE (Query normalization, multi-intent detection)  
+**Phase 6:** ✅ COMPLETE (SWR, Streaming, Analytics, Circuit Breakers)  
+**Phase 7:** ✅ COMPLETE (Context-Aware Smart Routing, `/chat` endpoint)  
 **Start Date:** March 18, 2026  
-**Current Date:** March 19, 2026  
+**Last Updated:** April 2, 2026  
 
 ## Directory Structure
 
@@ -23,49 +23,56 @@ semantic-cache/
 ├── pyproject.toml                 # Poetry configuration
 ├── requirements.txt               # Python dependencies
 │
-├── src/                          # Main application code
+├── src/                           # Main application code
 │   ├── __init__.py
-│   ├── core/                     # Core cache engine
-│   ├── cache/                    # Cache implementations (L1, L2, L3)
-│   ├── embedding/                # Embedding service integrations
-│   ├── similarity/               # ANN similarity matching
-│   ├── api/                      # FastAPI endpoints
-│   ├── ml/                       # ML models and inference
-│   ├── multi_tenancy/            # Tenant isolation and management
-│   ├── monitoring/               # Metrics and observability
-│   └── utils/                    # Helper utilities
+│   ├── core/
+│   │   └── circuit_breaker.py     # CircuitBreaker CLOSED/OPEN/HALF_OPEN
+│   ├── cache/
+│   │   ├── cache_manager.py       # Main orchestrator + SWR + Circuit Breaker integration
+│   │   ├── base.py                # CacheEntry, CacheMetrics, is_stale()
+│   │   ├── context.py             # ContextAnalyzer, ContextAwareCache, SmartCacheRouter
+│   │   ├── streaming.py           # StreamingCache (stream_and_cache + get_stream)
+│   │   ├── l1_cache.py            # In-memory LRU/LFU cache
+│   │   ├── l2_cache.py            # Redis cache tier
+│   │   └── l3_cache.py            # PostgreSQL + pgvector
+│   ├── ml/
+│   │   └── query_parser.py        # QueryNormalizer + RuleBasedIntentDetector
+│   ├── embedding/                 # Embedding service integrations
+│   ├── similarity/                # ANN similarity matching
+│   ├── api/
+│   │   └── routes/
+│   │       ├── cache.py           # All cache, chat, and stream endpoints
+│   │       └── analytics.py       # /metrics/realtime, /metrics/historical, /ws/realtime
+│   ├── multi_tenancy/             # Tenant isolation and management
+│   ├── monitoring/
+│   │   └── analytics.py           # AnalyticsCollector (Redis Streams → PostgreSQL)
+│   └── utils/                     # Helper utilities
 │
-├── tests/                        # Test suites
-│   ├── unit/                     # Unit tests
-│   ├── integration/              # Integration tests
-│   └── performance/              # Performance benchmarks
+├── tests/
+│   ├── unit/                      # Unit tests
+│   ├── integration/               # Integration tests
+│   ├── performance/               # Performance benchmarks
+│   ├── test_multi_intent.py       # Multi-intent decomposition tests
+│   └── test_context_cache.py      # Context-aware routing tests (planned)
 │
-├── config/                       # Configuration files
-│   └── default.yaml              # Default configuration
+├── config/
+│   └── default.yaml               # Default configuration
 │
-├── deployment/                   # Deployment artifacts
-│   ├── docker/                   # Docker configurations
-│   ├── kubernetes/               # Kubernetes manifests
-│   └── terraform/                # Infrastructure as Code
+├── docs/
+│   ├── FEATURES.md                # Full feature reference (all phases)
+│   ├── architecture/
+│   ├── guides/
+│   │   ├── SETUP.md
+│   │   └── USAGE_GUIDE.md
+│   └── ...
 │
-├── docs/                         # Documentation
-│   ├── architecture/             # System architecture docs
-│   │   └── ARCHITECTURE.md       # High-level design
-│   ├── api/                      # API documentation
-│   └── guides/                   # Integration guides
-│       └── SETUP.md              # Development setup guide
+├── monitoring/
+│   ├── prometheus/
+│   └── grafana/
 │
-├── monitoring/                   # Observability stack
-│   ├── prometheus/               # Prometheus configuration
-│   │   └── prometheus.yml
-│   └── grafana/                  # Grafana dashboards
-│
-├── scripts/                      # Utility scripts
-├── .github/
-│   └── workflows/                # CI/CD workflows
-│       └── tests.yml             # GitHub Actions testing
-│
-└── .gitignore                    # Git ignore rules
+└── .github/
+    └── workflows/
+        └── tests.yml
 ```
 
 ## Key Files
@@ -173,12 +180,27 @@ make clean                  # Remove build artifacts
 - [x] Redis Pub/Sub cache invalidation
 - [x] Production deployment guide & docker-compose.prod.yml
 
-### Phase 4: Intelligence Layer ✅ COMPLETE
-- [x] Domain classifier (keyword-based)
-- [x] Adaptive similarity thresholds
-- [x] Predictive cache warming
-- [x] Cost-aware eviction policy
-- [x] Fine-tuning pipeline (skeleton)
+### Phase 5: Semantic Enhancements ✅ COMPLETE
+- [x] QueryNormalizer – canonicalize queries before embedding
+- [x] RuleBasedIntentDetector – split complex queries into atomic sub-queries
+- [x] LLMIntentDetector stub – ready for OpenAI/Gemini wiring
+- [x] `/api/v1/cache/semantic/multi/search` endpoint
+
+### Phase 6: Production Resilience ✅ COMPLETE
+- [x] Stale-While-Revalidate – serve stale hits + background asyncio refresh task
+- [x] `CacheEntry.is_stale()` with configurable grace multiplier
+- [x] StreamingCache – record token timing, replay on cache hit via SSE
+- [x] `/api/v1/cache/semantic/stream` endpoint
+- [x] AnalyticsCollector – Redis Streams → Postgres `DATE_TRUNC` aggregation
+- [x] Analytics API – `/metrics/realtime`, `/metrics/historical`, `/ws/realtime`
+- [x] CircuitBreaker – CLOSED/OPEN/HALF_OPEN wrapping embedding + compute calls
+
+### Phase 7: Context-Aware Routing ✅ COMPLETE
+- [x] ContextAnalyzer – detect STATELESS / CONTEXTUAL / AMBIGUOUS queries
+- [x] ContextAwareCache – composite `hash(query + context_turns)` keys
+- [x] SmartCacheRouter – unified orchestrator, no changes to CacheManager
+- [x] `/api/v1/cache/chat` endpoint with `X-Conversation-Id` + `X-Conversation-History` headers
+- [x] `future_improvements.md` – spaCy NER and LLM summarization upgrade path
 
 ## Team Roles
 
@@ -274,6 +296,6 @@ See [docs/INDEX.md](docs/INDEX.md) for:
 
 ---
 
-**Last Updated:** March 19, 2026  
-**Status:** All Phases Complete  
+**Last Updated:** April 2, 2026  
+**Status:** All Phases Complete (Phase 1–7)  
 **Contact:** Project Team

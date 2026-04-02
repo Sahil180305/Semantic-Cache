@@ -3,7 +3,7 @@
 import time
 import json
 import asyncio
-from fastapi import APIRouter, Depends, Path, Query, Request, HTTPException, status
+from fastapi import APIRouter, Depends, Path, Query, Request, HTTPException, status, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Any, List
@@ -603,3 +603,73 @@ async def semantic_cache_stream(
         media_type="text/event-stream",
         headers={"X-Cache-Status": "MISS"}
     )
+
+class ChatRequest(BaseModel):
+    query: str = Field(..., description="Query text")
+    domain: Optional[str] = "general"
+    metadata: Optional[dict] = None
+
+@router.post("/chat")
+async def chat(
+    body: ChatRequest,
+    req: Request = None,
+    x_conversation_id: Optional[str] = Header(None),
+    x_conversation_history: Optional[str] = Header(None),
+    current_user: TokenPayload = Depends(get_current_user),
+    tenant_id: str = Depends(get_tenant_id)
+):
+    """
+    Smart endpoint that auto-detects context needs and routes
+    to either context_cache or semantic_cache
+    """
+    cache_manager = getattr(req.app.state, 'cache_manager', None)
+    if not cache_manager:
+        raise HTTPException(status_code=503, detail="Cache disabled")
+        
+    if not hasattr(req.app.state, 'smart_router'):
+        from src.cache.context import SmartCacheRouter
+        embedder = getattr(cache_manager, '_embedding_service', None)
+        req.app.state.smart_router = SmartCacheRouter(cache_manager, embedder)
+        
+    router_instance = req.app.state.smart_router
+    
+    history = None
+    if x_conversation_history:
+        try:
+            history = json.loads(x_conversation_history)
+        except:
+            pass
+            
+    cache_result = await router_instance.get(
+        query=body.query,
+        conversation_id=x_conversation_id,
+        conversation_history=history,
+        tenant_id=tenant_id,
+        domain=body.domain
+    )
+    
+    if cache_result.get("hit"):
+        return {
+            "response": cache_result.get("response"),
+            "cached": True,
+            "cache_type": cache_result.get("query_type"),
+            "routed_to": cache_result.get("routed_to")
+        }
+        
+    response_text = f"Simulated LLM response for: {body.query}"
+    
+    await router_instance.set(
+        query=body.query,
+        response=response_text,
+        conversation_id=x_conversation_id,
+        conversation_history=history,
+        tenant_id=tenant_id,
+        domain=body.domain
+    )
+    
+    return {
+        "response": response_text,
+        "cached": False,
+        "cache_type": None,
+        "routed_to": None
+    }
