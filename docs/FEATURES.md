@@ -223,6 +223,26 @@ No `X-Conversation-History` header → treated as stateless, routed to existing 
 
 ---
 
+## Phase 8: Frontend Dashboard
+**Path:** `frontend-services/dashboard/`
+
+A modern, standalone Next.js frontend to visualize real-time caching analytics.
+
+**Features:**
+- Realtime WebSocket integration for live Hit Rates and Analytics.
+- Premium dark-mode, glassmorphism UI built with Vanilla CSS and Recharts.
+- Top Query exploration and Historical performance views.
+
+**Run Instructions:**
+```bash
+cd frontend-services/dashboard
+npm install
+npm run dev
+```
+Dashboard defaults to `http://localhost:3000`.
+
+---
+
 ## Future Improvements
 
 See [`future_improvements.md`](../brain/*/future_improvements.md) for planned upgrades:
