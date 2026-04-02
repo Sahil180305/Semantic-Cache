@@ -19,7 +19,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Callable, Awaitable
+from typing import Any, Dict, List, Optional, Tuple, Callable, Awaitable, TYPE_CHECKING
 
 from src.cache.base import CacheEntry, CacheHitReason, CacheConfig
 from src.cache.l1_cache import L1Cache
@@ -27,6 +27,9 @@ from src.cache.l2_cache import L2Cache, L2CacheMetrics
 from src.cache.l3_cache import L3Cache, L3CacheMetrics
 from src.cache.redis_config import RedisConfig
 from src.ml.query_parser import QueryNormalizer, RuleBasedIntentDetector, MultiIntentQuery, SubQuery
+
+if TYPE_CHECKING:
+    from src.cache.index_manager import UnifiedIndexManager
 
 
 logger = logging.getLogger(__name__)
