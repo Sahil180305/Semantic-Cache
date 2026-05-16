@@ -31,6 +31,10 @@ from src.embedding.base import EmbeddingProviderType
 from src.similarity.service import SimilaritySearchService
 from src.similarity.base import SimilarityMetric
 
+# Import database initialization (Fix for Gap: Database not initialized at startup)
+from src.core.database import init_database
+from src.core.config import SemanticCacheConfig, DatabaseConfig
+
 # Configure logging
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
@@ -77,6 +81,25 @@ async def startup_event():
     logger.info(f"Environment: {settings.ENVIRONMENT}")
     logger.info(f"Log level: {settings.LOG_LEVEL}")
     
+    # Step 0: Initialize Database
+    # ========================================================================
+    try:
+        logger.info("Initializing database...")
+        # Create a config object for the database manager using API settings
+        db_config = DatabaseConfig(
+            url=settings.DATABASE_URL,
+            pool_size=settings.CONNECTION_POOL_SIZE,
+            max_overflow=settings.CONNECTION_POOL_SIZE // 2
+        )
+        core_config = SemanticCacheConfig(database=db_config)
+        db_manager = init_database(core_config)
+        
+        # Create tables if they don't exist
+        db_manager.create_all_tables()
+        logger.info("Database initialized and tables verified")
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+
     # ========================================================================
     # Step 1: Initialize Unified Index Manager (Gap #2 Fix)
     # This creates a single HNSW index shared by all components
@@ -242,7 +265,7 @@ async def startup_event():
     # Step 7: Initialize Tenant Manager
     # ========================================================================
     try:
-        from src.cache.multi_tenancy import TenantManager
+        from src.core.tenant_manager import TenantManager
         app.state.tenant_manager = TenantManager()
         logger.info("Tenant manager initialized")
     except Exception as e:

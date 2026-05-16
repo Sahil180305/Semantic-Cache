@@ -83,13 +83,13 @@ class SemanticGetOrComputeRequest(BaseModel):
 
 @router.get("/{key}", response_model=CacheGetResponse)
 async def get_cache(
+    request: Request,
     key: str = Path(..., description="Cache key"),
-    request: Request = None,
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
     """Retrieve value from cache by exact key."""
-    cache_manager = request.app.state.cache_manager if hasattr(request.app.state, 'cache_manager') else None
+    cache_manager = request.app.state.cache_manager if request and hasattr(request.app.state, 'cache_manager') else None
     
     if cache_manager is None:
         raise HTTPException(
@@ -126,8 +126,8 @@ async def get_cache(
 
 @router.put("/{key}", response_model=CachePutResponse, status_code=201)
 async def put_cache(
+    request: Request,
     key: str = Path(..., description="Cache key"),
-    request: Request = None,
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
@@ -137,6 +137,9 @@ async def put_cache(
     This endpoint now generates real embeddings for the key text,
     enabling semantic similarity search for cached items.
     """
+    if request is None:
+        raise HTTPException(status_code=400, detail="Request required")
+        
     cache_manager = request.app.state.cache_manager if hasattr(request.app.state, 'cache_manager') else None
     embedding_service = getattr(request.app.state, 'embedding_service', None)
     index_manager = getattr(request.app.state, 'index_manager', None)
@@ -231,12 +234,15 @@ async def put_cache(
 
 @router.delete("/{key}", status_code=204)
 async def delete_cache(
+    request: Request,
     key: str = Path(..., description="Cache key"),
-    request: Request = None,
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
     """Delete cached value."""
+    if request is None:
+        raise HTTPException(status_code=400, detail="Request required")
+        
     cache_manager = request.app.state.cache_manager if hasattr(request.app.state, 'cache_manager') else None
     index_manager = getattr(request.app.state, 'index_manager', None)
     
@@ -264,12 +270,15 @@ async def delete_cache(
 
 @router.post("/batch", response_model=CacheBatchResponse)
 async def batch_get_cache(
-    request: Request = None,
-    body: CacheBatchRequest = None,
+    request: Request,
+    body: Optional[CacheBatchRequest] = None,
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
     """Get multiple cache values in one request."""
+    if request is None:
+        raise HTTPException(status_code=400, detail="Request required")
+        
     cache_manager = request.app.state.cache_manager if hasattr(request.app.state, 'cache_manager') else None
     
     if cache_manager is None:
@@ -312,7 +321,7 @@ async def batch_get_cache(
 
 @router.delete("", status_code=200)
 async def clear_cache(
-    request: Request = None,
+    request: Request,
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
@@ -323,6 +332,9 @@ async def clear_cache(
             detail="Admin access required"
         )
     
+    if request is None:
+        raise HTTPException(status_code=400, detail="Request required")
+        
     cache_manager = request.app.state.cache_manager if hasattr(request.app.state, 'cache_manager') else None
     index_manager = getattr(request.app.state, 'index_manager', None)
     
@@ -359,8 +371,8 @@ async def clear_cache(
 
 @router.post("/semantic", response_model=SemanticCacheResponse)
 async def semantic_cache_put(
+    request: Request,
     body: SemanticCacheRequest,
-    request: Request = None,
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
@@ -371,6 +383,9 @@ async def semantic_cache_put(
     semantic similarity search. Use this when you want items to be
     findable via similar queries, not just exact key matches.
     """
+    if request is None:
+        raise HTTPException(status_code=400, detail="Request required")
+        
     cache_manager = request.app.state.cache_manager if hasattr(request.app.state, 'cache_manager') else None
     embedding_service = getattr(request.app.state, 'embedding_service', None)
     
@@ -427,8 +442,8 @@ async def semantic_cache_put(
 
 @router.post("/semantic/search", response_model=SemanticCacheResponse)
 async def semantic_cache_search(
+    request: Request,
     body: SemanticCacheRequest,
-    request: Request = None,
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
@@ -445,6 +460,9 @@ async def semantic_cache_search(
     - general: 0.85 (balanced)
     - ecommerce: 0.75-0.80 (broad matching)
     """
+    if request is None:
+        raise HTTPException(status_code=400, detail="Request required")
+        
     cache_manager = request.app.state.cache_manager if hasattr(request.app.state, 'cache_manager') else None
     
     if cache_manager is None:
@@ -495,14 +513,17 @@ async def semantic_cache_search(
 
 @router.post("/semantic/multi/search", response_model=SemanticCacheMultiResponse)
 async def semantic_cache_multi_search(
+    request: Request,
     body: SemanticCacheRequest,
-    request: Request = None,
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
     """
     Search cache utilizing automatic query decomposition for multi-intent queries.
     """
+    if request is None:
+        raise HTTPException(status_code=400, detail="Request required")
+        
     cache_manager = request.app.state.cache_manager if hasattr(request.app.state, 'cache_manager') else None
     
     if cache_manager is None:
@@ -543,11 +564,14 @@ async def semantic_cache_multi_search(
 
 @router.get("/semantic/stats")
 async def get_semantic_stats(
-    request: Request = None,
+    request: Request,
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
     """Get semantic cache statistics."""
+    if request is None:
+        raise HTTPException(status_code=400, detail="Request required")
+        
     cache_manager = request.app.state.cache_manager if hasattr(request.app.state, 'cache_manager') else None
     
     if cache_manager is None:
@@ -564,16 +588,20 @@ async def get_semantic_stats(
         "cache": combined_stats,
         "tenant_id": tenant_id
     }
+
 @router.post("/semantic/stream")
 async def semantic_cache_stream(
+    request: Request,
     body: SemanticCacheRequest,
-    request: Request = None,
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
     """
     Look up stream cache; if missed, pretend to generate and cache stream tokens.
     """
+    if request is None:
+        raise HTTPException(status_code=400, detail="Request required")
+        
     cache_manager = getattr(request.app.state, 'cache_manager', None)
     if not cache_manager:
         raise HTTPException(status_code=503, detail="Cache disabled")
@@ -611,8 +639,8 @@ class ChatRequest(BaseModel):
 
 @router.post("/chat")
 async def chat(
+    req: Request,
     body: ChatRequest,
-    req: Request = None,
     x_conversation_id: Optional[str] = Header(None),
     x_conversation_history: Optional[str] = Header(None),
     current_user: TokenPayload = Depends(get_current_user),
@@ -622,6 +650,9 @@ async def chat(
     Smart endpoint that auto-detects context needs and routes
     to either context_cache or semantic_cache
     """
+    if req is None:
+        raise HTTPException(status_code=400, detail="Request required")
+        
     cache_manager = getattr(req.app.state, 'cache_manager', None)
     if not cache_manager:
         raise HTTPException(status_code=503, detail="Cache disabled")

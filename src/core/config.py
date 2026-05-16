@@ -380,3 +380,7 @@ def get_config(config_path: Optional[Path] = None) -> SemanticCacheConfig:
     """
     loader = ConfigLoader(config_path=config_path)
     return loader.load()
+
+
+# Module-level singleton — allows `from src.core.config import settings`
+settings: SemanticCacheConfig = SemanticCacheConfig()

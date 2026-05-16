@@ -54,16 +54,18 @@ class StreamingCache:
         # In a real cluster we could write to L2 explicitly, 
         # but using the cache_manager abstraction:
         from src.cache.base import CacheEntry
-        import hashlib
         
+        emb_dim = getattr(self.cache_manager.config, "embedding_dimension", 384)
         entry = CacheEntry(
             query_id=f"stream:{key}",
             query_text=metadata.get("query", key),
-            embedding=[0.0] * self.cache_manager.config.embedding_dimension, # Placeholder for stream metadata map
+            embedding=[0.0] * emb_dim,
             response=json.dumps(stream_data),
             metadata=metadata
         )
+        entry.calculate_memory(emb_dim)
         self.cache_manager.put(entry, tenant_id="default")
+
 
     async def get_stream(self, key: str, speed_multiplier: float = 1.0) -> Optional[AsyncGenerator[str, None]]:
         """Retrieves and replays tokens adhering to temporal offsets for realistic feeling."""

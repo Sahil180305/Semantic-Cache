@@ -287,22 +287,24 @@ class ContextAwareCache:
             return None
         embedding_text = f"{context.to_embedding_text()} | Query: {query}"
         embedding_record = await self.embedder.embed_text(embedding_text)
-        
+
+        # search() takes embedding= (not query_embedding=) and returns (item_id, similarity, entry) tuples
         results = self.cache._index_manager.search(
-            query_embedding=embedding_record.embedding,
-            limit=3
+            embedding=embedding_record.embedding,
+            k=3
         )
         if results:
-            best = results[0]
-            # Since _index_manager returns dicts holding item_id and metrics:
-            if best["similarity"] > self.similarity_threshold:
-                 # Fetch exact from cache
-                 hit = self.cache.l1_cache.get(best["item_id"]) or (await self.cache.l2_cache.get(best["item_id"]) if self.cache.l2_cache else None)
-                 if hit:
-                     return {
-                         "response": hit.response,
-                         "similarity": best["similarity"]
-                     }
+            item_id, similarity, entry = results[0]
+            if similarity > self.similarity_threshold:
+                # Fetch exact from cache
+                hit = self.cache.l1_cache.get(item_id) or (
+                    await self.cache.l2_cache.get(item_id) if self.cache.l2_cache else None
+                )
+                if hit:
+                    return {
+                        "response": hit.response,
+                        "similarity": similarity
+                    }
         return None
     
     async def _generate_summary(self, history: List[Dict]) -> Optional[str]:

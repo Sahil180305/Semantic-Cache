@@ -17,31 +17,23 @@ export default function OverviewPage() {
   const [wsStatus, setWsStatus] = useState('Connecting...');
 
   useEffect(() => {
+    /* 
+    // TODO: Uncomment when connecting to actual backend
     // 1. Fetch Top Queries
     fetch(`${API_BASE}/insights/top-queries?limit=5`)
       .then(res => res.json())
       .then(data => setTopQueries(Array.isArray(data) ? data : []))
       .catch(console.error);
 
-    // 2. Fetch Historical for Chart (Mock if no actual API timescale output)
+    // 2. Fetch Historical for Chart
     const end = new Date().toISOString();
     const start = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     fetch(`${API_BASE}/metrics/historical?start=${start}&end=${end}&granularity=1h`)
       .then(res => res.json())
       .then(res => {
          if (res && res.data && res.data.length > 0) setHistoryData(res.data);
-         else {
-             // Mock data if backend implies nothing
-             setHistoryData([
-                { time: '10:00', hit_rate: 0.4 }, { time: '11:00', hit_rate: 0.55 },
-                { time: '12:00', hit_rate: 0.65 }, { time: '13:00', hit_rate: 0.70 },
-                { time: '14:00', hit_rate: 0.68 }, { time: '15:00', hit_rate: 0.80 },
-             ]);
-         }
       })
-      .catch(() => {
-         setHistoryData([{ time: '10:00', hit_rate: 0.4 }, { time: '12:00', hit_rate: 0.65 }, { time: '15:00', hit_rate: 0.80 }]);
-      });
+      .catch(console.error);
 
     // 3. Setup WebSocket
     const ws = new WebSocket(WS_BASE);
@@ -56,8 +48,34 @@ export default function OverviewPage() {
     ws.onerror = () => setWsStatus('Error');
 
     return () => {
-      ws.close();
+      if (ws.readyState === 1) {
+        ws.close();
+      }
     };
+    */
+
+    // DUMMY DATA LOGIC
+    setTopQueries([
+      { query_hash: 'What is the capital of France?', access_count: 142 },
+      { query_hash: 'How to build a semantic cache', access_count: 98 },
+      { query_hash: 'Difference between REST and GraphQL', access_count: 76 },
+      { query_hash: 'FastAPI dependency injection', access_count: 45 },
+      { query_hash: 'React hooks lifecycle', access_count: 32 },
+    ]);
+
+    setHistoryData([
+      { time: '00:00', hit_rate: 0.42 }, { time: '04:00', hit_rate: 0.48 },
+      { time: '08:00', hit_rate: 0.55 }, { time: '12:00', hit_rate: 0.76 },
+      { time: '16:00', hit_rate: 0.81 }, { time: '20:00', hit_rate: 0.79 },
+      { time: '24:00', hit_rate: 0.85 },
+    ]);
+
+    setRealtimeData({
+      hit_rate: 0.82,
+      semantic_hit_rate: 0.45,
+      timestamp: new Date().toISOString()
+    });
+    setWsStatus('Dummy Data');
   }, []);
 
   return (
