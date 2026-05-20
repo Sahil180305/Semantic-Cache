@@ -2,7 +2,6 @@
 
 import time
 import json
-import asyncio
 from fastapi import APIRouter, Depends, Path, Query, Request, HTTPException, status, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -28,6 +27,13 @@ router = APIRouter()
 # ============================================================================
 # Semantic Cache Request/Response Models
 # ============================================================================
+
+class CachePutBody(BaseModel):
+    """Request body for PUT /cache/{key}."""
+    value: Any = Field(..., description="Value to store in the cache (any JSON-serialisable data)")
+    domain: Optional[str] = Field(None, description="Domain hint for threshold selection")
+    metadata: Optional[dict] = Field(None, description="Additional metadata to attach to the entry")
+
 
 class SemanticCacheRequest(BaseModel):
     """Request for semantic cache operations."""
@@ -128,87 +134,80 @@ async def get_cache(
 async def put_cache(
     request: Request,
     key: str = Path(..., description="Cache key"),
+    body: CachePutBody = ...,
     current_user: TokenPayload = Depends(get_current_user),
     tenant_id: str = Depends(get_tenant_id)
 ):
     """
     Cache a value with automatic embedding generation.
-    
-    This endpoint now generates real embeddings for the key text,
-    enabling semantic similarity search for cached items.
+
+    Stores `body.value` under `key` with real sentence-transformer embeddings,
+    enabling semantic similarity search for future lookups.
     """
-    if request is None:
-        raise HTTPException(status_code=400, detail="Request required")
-        
     cache_manager = request.app.state.cache_manager if hasattr(request.app.state, 'cache_manager') else None
     embedding_service = getattr(request.app.state, 'embedding_service', None)
     index_manager = getattr(request.app.state, 'index_manager', None)
     domain_classifier = getattr(request.app.state, 'domain_classifier', None)
-    
+
     if cache_manager is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Cache manager not available"
         )
-    
-    # Parse request body
-    try:
-        raw_body = await request.body()
-        value = json.loads(raw_body) if raw_body else {}
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid JSON in request body: {str(e)}"
-        )
-    
+
+    value = body.value
     cache_key = f"{tenant_id}:{key}"
-    
-    # Detect domain
-    domain = "general"
-    if domain_classifier:
+
+    # Detect domain (body override wins, then classifier, then default)
+    domain = body.domain or "general"
+    if not body.domain and domain_classifier:
         try:
             domain = domain_classifier.classify(key)
         except Exception:
             pass
-    
+
     # Generate real embedding if service available
     embedding = None
     embedding_dim = 384  # Default dimension
-    
+
     if embedding_service:
         try:
             embedding_record = await embedding_service.embed_text(key)
             embedding = embedding_record.embedding
             embedding_dim = len(embedding)
         except Exception as e:
-            # Log but continue with placeholder
             import logging
             logging.warning(f"Embedding generation failed, using placeholder: {e}")
-    
+
     # Fall back to placeholder if no embedding generated
     if embedding is None:
         embedding = [0.0] * embedding_dim
-    
+
+    # Build entry metadata
+    entry_metadata = {"source": "api", "object": "cache_put", "has_real_embedding": embedding_service is not None}
+    if body.metadata:
+        entry_metadata.update(body.metadata)
+
     # Create cache entry with real embedding
     entry = CacheEntry(
         query_id=cache_key,
         query_text=key,
         embedding=embedding,
         response=value,
-        metadata={"source": "api", "object": "cache_put", "has_real_embedding": embedding_service is not None},
+        metadata=entry_metadata,
         domain=domain
     )
     entry.calculate_memory(embedding_dim)
-    
+
     # Store in cache
     success = cache_manager.put(entry)
-    
+
     if not success:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to cache value"
         )
-    
+
     # Also add to unified index for semantic search
     if index_manager and embedding_service:
         try:
@@ -223,7 +222,7 @@ async def put_cache(
         except Exception as e:
             import logging
             logging.warning(f"Failed to add to index: {e}")
-    
+
     return CachePutResponse(
         key=key,
         cached=True,
@@ -497,6 +496,34 @@ async def semantic_cache_search(
             embedding_generated=True
         )
     
+    llm_service = getattr(request.app.state, 'llm_service', None)
+    
+    if llm_service and llm_service.api_key:
+        generated_response = await llm_service.generate_response(body.query)
+        
+        if generated_response and not generated_response.startswith("Error:"):
+            # Cache the generated response
+            await cache_manager.put_semantic_async(
+                query_text=body.query,
+                response=generated_response,
+                tenant_id=tenant_id,
+                domain=body.domain,
+                metadata={"source": "llm_generated"}
+            )
+            
+            return SemanticCacheResponse(
+                query=body.query,
+                response=generated_response,
+                hit=False,
+                similarity=0.0,
+                cache_level="l1",
+                hit_reason="miss_llm_generated",
+                domain=body.domain or "general",
+                threshold_used=body.threshold or 0.85,
+                latency_ms=round((time.time() - start_time) * 1000, 2),
+                embedding_generated=True
+            )
+    
     return SemanticCacheResponse(
         query=body.query,
         response=None,
@@ -619,23 +646,31 @@ async def semantic_cache_stream(
         )
         
     # Miss -> generate
-    async def generate_mock_stream():
-        tokens = ["This", " is", " a", " generated", " stream", " replaying", " live."]
-        for t in tokens:
-            yield t
-            await asyncio.sleep(0.1)
+    llm_service = getattr(request.app.state, 'llm_service', None)
+    
+    if llm_service and llm_service.api_key:
+        generator = stream_cache.stream_and_cache(
+            query_key, 
+            llm_service.generate_stream(query_key), 
+            body.metadata or {"source": "llm_generated"}
+        )
+        return StreamingResponse(
+            generator,
+            media_type="text/event-stream",
+            headers={"X-Cache-Status": "MISS"}
+        )
+    else:
+        async def generate_mock_stream():
+            yield "LLM service not configured. Could not generate response."
             
-    generator = stream_cache.stream_and_cache(query_key, generate_mock_stream(), body.metadata or {})
-    return StreamingResponse(
-        generator, 
-        media_type="text/event-stream",
-        headers={"X-Cache-Status": "MISS"}
-    )
+        generator = stream_cache.stream_and_cache(query_key, generate_mock_stream(), body.metadata or {})
+        return StreamingResponse(
+            generator, 
+            media_type="text/event-stream",
+            headers={"X-Cache-Status": "MISS"}
+        )
 
-class ChatRequest(BaseModel):
-    query: str = Field(..., description="Query text")
-    domain: Optional[str] = "general"
-    metadata: Optional[dict] = None
+from src.api.models import ChatRequest, Message
 
 @router.post("/chat")
 async def chat(
@@ -647,8 +682,8 @@ async def chat(
     tenant_id: str = Depends(get_tenant_id)
 ):
     """
-    Smart endpoint that auto-detects context needs and routes
-    to either context_cache or semantic_cache
+    Stateless, context-aware smart chat routing endpoint.
+    Uses local LLM for context query rewriting and intent decomposition.
     """
     if req is None:
         raise HTTPException(status_code=400, detail="Request required")
@@ -664,43 +699,40 @@ async def chat(
         
     router_instance = req.app.state.smart_router
     
-    history = None
-    if x_conversation_history:
+    # 1. Resolve conversation history: prioritize body.history, fallback to header
+    history = body.history
+    if not history and x_conversation_history:
         try:
-            history = json.loads(x_conversation_history)
-        except:
+            raw_history = json.loads(x_conversation_history)
+            if isinstance(raw_history, list):
+                history = [Message(role=item.get("role", "user"), content=item.get("content", "")) for item in raw_history]
+        except Exception:
             pass
             
-    cache_result = await router_instance.get(
-        query=body.query,
-        conversation_id=x_conversation_id,
-        conversation_history=history,
-        tenant_id=tenant_id,
-        domain=body.domain
-    )
+    # Resolve conversation_id (context_id)
+    conversation_id = body.context_id or x_conversation_id
+
+    # Resolve tenant_id
+    resolved_tenant_id = body.tenant_id if body.tenant_id and body.tenant_id != "default" else tenant_id
     
-    if cache_result.get("hit"):
-        return {
-            "response": cache_result.get("response"),
-            "cached": True,
-            "cache_type": cache_result.get("query_type"),
-            "routed_to": cache_result.get("routed_to")
-        }
-        
-    response_text = f"Simulated LLM response for: {body.query}"
+    llm_service = getattr(req.app.state, 'llm_service', None)
     
-    await router_instance.set(
+    # 2. Invoke SmartCacheRouter.handle_chat statelessly
+    cache_result = await router_instance.handle_chat(
         query=body.query,
-        response=response_text,
-        conversation_id=x_conversation_id,
-        conversation_history=history,
-        tenant_id=tenant_id,
-        domain=body.domain
+        history=history,
+        context_id=conversation_id,  # Ignored for lookup inside router
+        tenant_id=resolved_tenant_id,
+        domain=body.domain or "general",
+        metadata=body.metadata,
+        llm_service=llm_service
     )
     
     return {
-        "response": response_text,
-        "cached": False,
-        "cache_type": None,
-        "routed_to": None
+        "response": cache_result.get("response"),
+        "cached": cache_result.get("hit", False),
+        "source": cache_result.get("source", "llm_generated"),
+        "rewritten_query": cache_result.get("rewritten_query"),
+        "sub_queries": cache_result.get("sub_queries")
     }
+

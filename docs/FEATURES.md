@@ -221,17 +221,16 @@ X-Conversation-History: [{"role":"user","content":"What is Python?"},{"role":"as
 
 No `X-Conversation-History` header → treated as stateless, routed to existing semantic cache automatically.
 
----
+## Phase 8: Frontend Visual Suite
+**Path:** `frontend-services/`
 
-## Phase 8: Frontend Dashboard
-**Path:** `frontend-services/dashboard/`
+A set of modern, standalone Next.js frontend applications to interface with the cache and monitor its performance.
 
-A modern, standalone Next.js frontend to visualize real-time caching analytics.
-
-**Features:**
-- Realtime WebSocket integration for live Hit Rates and Analytics.
-- Premium dark-mode, glassmorphism UI built with Vanilla CSS and Recharts.
-- Top Query exploration and Historical performance views.
+### 1. Analytics Dashboard (`dashboard/`)
+Visualizes real-time and historical caching metrics.
+- **Realtime WebSocket Integration:** Connects to `/ws/realtime` for live hit rates, latencies, and active throughput tracking.
+- **Rich Aesthetics:** Premium dark-mode UI with a modern glassmorphism design utilizing Vanilla CSS and animated charts (Recharts).
+- **Insights & Query Explorer:** Explores historical data, aggregated daily time-series performance, and top cache-hit queries.
 
 **Run Instructions:**
 ```bash
@@ -239,13 +238,50 @@ cd frontend-services/dashboard
 npm install
 npm run dev
 ```
-Dashboard defaults to `http://localhost:3000`.
+Dashboard is hosted at `http://localhost:3000`.
+
+### 2. Consumer Chat App (`chat-app/`)
+A responsive conversational client leveraging the `/chat` route to demonstrate smart routing and LLM recovery.
+- **Conversational State Tracking:** Captures chat histories and automatically injects appropriate headers (`X-Conversation-Id`, `X-Conversation-History`).
+- **Interactive UI:** Smooth transitions, message timing, and caching badges showing whether a turn was returned from semantic cache, exact cache, or generated live.
+
+**Run Instructions:**
+```bash
+cd frontend-services/chat-app
+npm install
+npm run dev
+```
+
+---
+
+## Phase 9: LLM Integration & Automatic Fallback
+**File:** `src/llm/service.py` — `LLMService`
+
+A modular LLM service that handles cache misses by generating fallback responses, returning them, and automatically caching them for subsequent lookups.
+
+### LLM Service Integration
+Supports multiple providers with a unified API interface.
+- **Gemini REST Integration:** The primary default driver calling Google Generative AI REST endpoint (`gemini-pro`).
+- **OpenAI Modular Driver:** A modular backend class ready for OpenAI API execution.
+
+### Automatic Miss Recovery
+Integrates directly into the semantic search flow:
+1. When `/api/v1/cache/semantic/search` is called and results in a **cache miss**, the API retrieves the query's answer from the LLM.
+2. It immediately writes the new response into the three-tier cache (L1 → L2 → L3) and regenerates its HNSW search embeddings.
+3. It returns the generated response to the client with `"hit": false` and `"hit_reason": "miss_llm_generated"`.
+
+### timing-authentic Streaming Miss
+When calling `/api/v1/cache/semantic/stream`:
+1. If the stream is cached, it replays the token stream with timing identical to the original delivery.
+2. If it's a **miss**, it streams directly from the LLM via SSE and caches token timing offsets on-the-fly.
 
 ---
 
 ## Future Improvements
 
-See [`future_improvements.md`](../brain/*/future_improvements.md) for planned upgrades:
+See [FUTURE_IMPROVEMENTS.md](./FUTURE_IMPROVEMENTS.md) for details on planned updates:
 
-1. **NER with spaCy** — Replace regex entity extraction in `ContextAnalyzer._extract_entities()` with `spacy.load("en_core_web_sm")` for production-grade entity recognition.
-2. **LLM Summarization** — Stub `ContextAwareCache._generate_summary()` is ready; wire in an OpenAI/Gemini client to compress long conversation histories before embedding.
+1. **API Analytics Authentication** — Require API key tokens for public metrics endpoints.
+2. **NER with spaCy** — Upgrade the stateless/contextual `ContextAnalyzer` using `spacy.load("en_core_web_sm")`.
+3. **LLM History Summarization** — Compress long histories using Gemini summarization before generating composite context keys.
+

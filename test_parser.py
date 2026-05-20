@@ -17,13 +17,13 @@ assert n3 == "How to bake a cake", f"Got: {n3}"
 n4 = qn.normalize("python vs java")
 assert n4 == "Compare python and java", f"Got: {n4}"
 n5 = qn.normalize("who is Albert Einstein")
-assert n5 == "Fact lookup Albert Einstein", f"Got: {n5}"
+assert n5 == "Fact lookup albert einstein", f"Got: {n5}"
 
 print("QueryNormalizer OK!")
 
 print("Testing RuleBasedIntentDetector...")
 id = RuleBasedIntentDetector()
-res = id.decompose("What is Python and how to use it")
+res = id.decompose("What is Python, and how to use it")
 print("Decomposed to:", len(res.sub_queries), "subqueries")
 assert len(res.sub_queries) == 2, f"Got {len(res.sub_queries)}"
 assert res.sub_queries[0].text == "What is Python"

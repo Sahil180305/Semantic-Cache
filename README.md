@@ -1,20 +1,24 @@
 # Semantic Caching Layer for Vector Databases
 
-A production-grade semantic cache that sits between LLM-powered applications and backend AI services, reducing latency and cost through intelligent similarity-aware caching.
+A production-grade semantic cache that sits between LLM-powered applications and backend AI services, reducing latency and cost through intelligent similarity-aware caching and automatic LLM-powered cache-miss recovery.
 
 ## 🚀 Quick Start
 
 ```bash
-# 1. Start infrastructure
+# 1. Start infrastructure (Redis, Postgres, Prometheus, Grafana)
 docker-compose up -d
 
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Start the API server
+# 3. Set up environment variables
+cp .env.example .env
+# Edit .env to set your LLM_API_KEY (Gemini is the default provider)
+
+# 4. Start the API server
 python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 
-# 4. Test it works
+# 5. Test it works
 curl http://localhost:8000/health
 ```
 
@@ -39,10 +43,12 @@ This project implements a smart caching layer that goes beyond exact-match cachi
 | **Analytics API** | Real-time and historical performance metrics via REST & WebSocket |
 | **Circuit Breaker** | Protect embedding/LLM services with CLOSED → OPEN → HALF-OPEN states |
 | **Context-Aware Caching** | Route conversational queries through a smart context-hash cache |
+| **LLM Miss Fallback** | Call Gemini/OpenAI on cache miss and automatically index the response |
 
 ### Architecture
 
 ```
+┌───────────────────────────────────────────────────────────────┐
 ┌───────────────────────────────────────────────────────────────┐
 │                     Your Application / Chatbot                │
 └───────────────────────────────────────────────────────────────┘
@@ -62,13 +68,14 @@ This project implements a smart caching layer that goes beyond exact-match cachi
 │  Semantic Cache  │            │  Context-Aware Cache │
 │  (stateless q.)  │            │  (conversational q.) │
 └──────────────────┘            └──────────────────────┘
-                    \          /
-                     ▼        ▼
+          \                                /
+           ▼                              ▼
       ┌──────────┐  ┌──────────┐  ┌──────────┐
-      │ L1 Cache │  │ L2 Cache │  │ L3 Cache │
-      │ (Memory) │  │ (Redis)  │  │(Postgres)│
-      │   <1ms   │  │  5-10ms  │  │ 10-50ms  │
-      └──────────┘  └──────────┘  └──────────┘
+      │ L1 Cache │  │ L2 Cache │  │ L3 Cache │      Cache Miss
+      │ (Memory) │  │ (Redis)  │  │(Postgres)│  ──────────────────►  ┌──────────────┐
+      │   <1ms   │  │  5-10ms  │  │ 10-50ms  │                       │ LLM Service  │
+      └──────────┘  └──────────┘  └──────────┘                       │ (Gemini/OAI) │
+                                                                     └──────────────┘
 ```
 
 ## 📖 Documentation
@@ -76,34 +83,33 @@ This project implements a smart caching layer that goes beyond exact-match cachi
 | Document | Description |
 |----------|-----------|
 | **[Feature Reference](./docs/FEATURES.md)** | All features: SWR, Streaming, Analytics, Circuit Breaker, Context-Aware Routing |
-| **[Usage Guide](./docs/guides/USAGE_GUIDE.md)** | Complete usage guide with RAG integration examples |
-| **[Architecture](./docs/ARCHITECTURE_COMPARISON.md)** | System architecture and design decisions |
-| **[Query Flow](./docs/QUERY_FLOW_EXPLAINED.md)** | How queries flow through the system |
-| **[Setup Guide](./docs/guides/SETUP.md)** | Detailed installation instructions |
+| **[Setup Guide](./docs/guides/SETUP.md)** | Detailed installation and environment configuration instructions |
+| **[Usage Guide](./docs/guides/USAGE_GUIDE.md)** | Complete usage guide with RAG integration and LLM fallback examples |
+| **[Architecture](./docs/architecture/ARCHITECTURE.md)** | System architecture, component breakdowns, and design decisions |
+| **[LLM Integration](./docs/guides/LLM_INTEGRATION.md)** | Documentation for the LLM Service (Gemini/OpenAI) and automatic caching |
+| **[Frontend Apps](./docs/guides/FRONTEND.md)** | Running and integrating the Analytics Dashboard and Chat Application |
 
 ## Usage Examples
 
-### Basic Semantic Caching
+### Conversational Caching (/chat)
 
 ```python
 import httpx
 
-# Store a query-response pair
-response = httpx.post("http://localhost:8000/api/v1/cache/semantic", json={
-    "query": "What is machine learning?",
-    "response": "Machine learning is a subset of AI...",
-    "domain": "technology"
-})
+# Chat with conversational context routing and auto-LLM fallback on miss
+response = httpx.post("http://localhost:8000/api/v1/cache/chat", 
+    headers={
+        "X-Conversation-Id": "session-123",
+        "X-Conversation-History": '[{"role":"user","content":"What is python?"},{"role":"assistant","content":"Python is a programming language."}]'
+    },
+    json={
+        "query": "Is it dynamically typed?",
+        "domain": "technology"
+    }
+)
 
-# Search for similar queries
-response = httpx.post("http://localhost:8000/api/v1/cache/semantic/search", json={
-    "query": "Explain ML to me",
-    "threshold": 0.85
-})
-
-# Returns cached response with 92% similarity match!
 print(response.json())
-# {"hit": true, "similarity": 0.92, "response": "Machine learning is..."}
+# {"response": "Yes, Python is dynamically typed...", "cached": true, "cache_type": "contextual"}
 ```
 
 ### RAG Integration
@@ -134,15 +140,15 @@ See the [Usage Guide](./docs/guides/USAGE_GUIDE.md) for complete examples with L
 |----------|--------|-------------|
 | `/health` | GET | Health check with cache status |
 | `/api/v1/cache/semantic` | POST | Store with semantic indexing |
-| `/api/v1/cache/semantic/search` | POST | Semantic similarity search |
+| `/api/v1/cache/semantic/search` | POST | Semantic similarity search (auto-generates LLM response on miss) |
 | `/api/v1/cache/semantic/multi/search` | POST | Multi-intent query decomposition |
 | `/api/v1/cache/{key}` | GET/PUT/DEL | Exact key operations |
 
-### Conversational / Streaming
+### Conversational & Streaming
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/v1/cache/chat` | POST | Smart context-aware routing (sets `X-Conversation-Id` / `X-Conversation-History` headers) |
-| `/api/v1/cache/semantic/stream` | POST | SSE token streaming with cache replay |
+| `/api/v1/cache/semantic/stream` | POST | SSE token streaming with cache replay (auto-streams from LLM on miss) |
 
 ### Analytics
 | Endpoint | Method | Description |
@@ -165,8 +171,8 @@ semantic-cache/
 ├── src/
 │   ├── api/
 │   │   └── routes/
-│   │       ├── cache.py          # All cache + chat + stream endpoints
-│   │       └── analytics.py      # Metrics & WebSocket analytics endpoints
+│   │       ├── cache.py          # Cache + chat + stream endpoints
+│   │       └── analytics.py      # Metrics & WebSocket analytics
 │   ├── cache/
 │   │   ├── cache_manager.py      # Tiered cache orchestrator (L1→L2→L3) + SWR + Circuit Breaker
 │   │   ├── base.py               # CacheEntry, CacheMetrics, is_stale()
@@ -176,7 +182,10 @@ semantic-cache/
 │   │   ├── l2_cache.py           # Redis cache tier
 │   │   └── l3_cache.py           # PostgreSQL + pgvector
 │   ├── core/
+│   │   ├── config.py             # Server & LLM configuration
 │   │   └── circuit_breaker.py    # CircuitBreaker (CLOSED/OPEN/HALF_OPEN)
+│   ├── llm/
+│   │   └── service.py            # Modular LLM service integration (Gemini & OpenAI)
 │   ├── ml/
 │   │   └── query_parser.py       # QueryNormalizer + RuleBasedIntentDetector
 │   ├── monitoring/
@@ -184,8 +193,11 @@ semantic-cache/
 │   ├── embedding/                # Embedding service (sentence-transformers)
 │   ├── similarity/               # HNSW index & similarity search
 │   └── multi_tenancy/            # Tenant isolation & quotas
+├── frontend-services/
+│   ├── dashboard/                # Next.js Analytics Dashboard (WebSocket & Recharts)
+│   └── chat-app/                 # Consumer Chat client app
 ├── tests/
-│   ├── test_multi_intent.py      # Multi-intent detection tests
+│   ├── unit/                     # Comprehensive test suites
 │   └── ...
 ├── docs/
 │   └── FEATURES.md               # Detailed feature documentation
@@ -205,6 +217,7 @@ semantic-cache/
 | **Phase 6**: Production Resilience | ✅ Complete | SWR, Streaming, Analytics API, Circuit Breaker |
 | **Phase 7**: Context-Aware Routing | ✅ Complete | Smart router, conversational caching, `/chat` endpoint |
 | **Phase 8**: Frontend Dashboard | ✅ Complete | Next.js Analytics dashboard, real-time WebSocket insights |
+| **Phase 9**: LLM Integration | ✅ Complete | Modular LLM service (Gemini/OpenAI), auto-cache-on-miss fallback |
 
 ## Testing
 
@@ -214,9 +227,6 @@ pytest tests/ -v
 
 # Run with coverage
 pytest tests/ --cov=src --cov-report=html
-
-# Performance tests
-pytest tests/performance/ -v
 ```
 
 ## Monitoring
@@ -226,26 +236,16 @@ Access monitoring dashboards:
 - **Prometheus**: http://localhost:9090
 
 Key metrics:
-- Cache hit rate by tier
+- Cache hit rate by tier (L1, L2, L3)
 - Latency percentiles (p50, p95, p99)
 - Cost savings estimation
 - Query throughput
-
-## Contributing
-
-1. Create a feature branch
-2. Make changes with tests
-3. Run `pytest` and `black`
-4. Submit a pull request
 
 ## License
 
 MIT License - See LICENSE file for details
 
-## Contact
-
-For questions or contributions, contact the project team.
-
 ---
 
-📚 **[Full Usage Guide →](./docs/guides/USAGE_GUIDE.md)**
+📚 **[Full Setup Guide →](./docs/guides/SETUP.md)** | **[Full Usage Guide →](./docs/guides/USAGE_GUIDE.md)**
+

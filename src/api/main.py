@@ -33,7 +33,10 @@ from src.similarity.base import SimilarityMetric
 
 # Import database initialization (Fix for Gap: Database not initialized at startup)
 from src.core.database import init_database
-from src.core.config import SemanticCacheConfig, DatabaseConfig
+from src.core.config import SemanticCacheConfig, DatabaseConfig, LLMConfig
+
+# Import LLM service
+from src.llm.service import LLMService
 
 # Configure logging
 logging.basicConfig(level=settings.LOG_LEVEL)
@@ -284,6 +287,23 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Error initializing cache warmer: {e}")
         app.state.cache_warmer = None
+        
+    # ========================================================================
+    # Step 9: Initialize LLM Service
+    # ========================================================================
+    try:
+        logger.info("Initializing LLM service...")
+        llm_config = LLMConfig(
+            provider=settings.LLM_PROVIDER,
+            api_key=settings.LLM_API_KEY or None,
+            model=settings.LLM_MODEL,
+        )
+        llm_service = LLMService(llm_config)
+        app.state.llm_service = llm_service
+        logger.info(f"LLM service initialized (provider: {settings.LLM_PROVIDER}, model: {settings.LLM_MODEL})")
+    except Exception as e:
+        logger.error(f"Error initializing LLM service: {e}")
+        app.state.llm_service = None
     
     logger.info("=" * 60)
     logger.info("Semantic Cache API startup complete!")
@@ -292,6 +312,7 @@ async def startup_event():
     logger.info(f"  - Cache Manager:     {'✓' if app.state.cache_manager else '✗'}")
     logger.info(f"  - Domain Classifier: {'✓' if app.state.domain_classifier else '✗'}")
     logger.info(f"  - Similarity Search: {'✓' if app.state.similarity_service else '✗'}")
+    logger.info(f"  - LLM Service:       {'✓' if app.state.llm_service else '✗'}")
     logger.info("=" * 60)
 
 

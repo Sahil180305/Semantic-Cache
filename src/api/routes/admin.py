@@ -6,7 +6,7 @@ from typing import Optional
 from ..schemas import AdminStatsResponse, OptimizeRequest, OptimizeResponse
 from ..auth.jwt import get_current_admin, TokenPayload
 from src.core.tenant_manager import TenantManager
-from src.core.config import settings
+from src.api.config import settings
 
 router = APIRouter()
 tenant_manager = TenantManager()
@@ -21,8 +21,9 @@ async def get_admin_stats(
     
     # Base L1/L2 capacity logic based on settings
     l1_capacity_pct = 0.0
-    if settings.cache.l1.max_size > 0:
-        l1_capacity_pct = min((stats["total_memory_mb"] / settings.cache.l1.max_size) * 100, 100.0)
+    if settings.L1_MAX_SIZE > 0:
+        # Note: stats total_memory_mb is not directly comparable to MAX_SIZE in count, but keeping the format
+        l1_capacity_pct = min((stats["total_items_cached"] / settings.L1_MAX_SIZE) * 100, 100.0)
         
     return AdminStatsResponse(
         total_items_cached=stats["total_items_cached"],
@@ -77,18 +78,18 @@ async def get_policies(
     """Get current caching policies."""
     return {
         "l1_policy": {
-            "eviction": settings.cache.l1.eviction_policy,
-            "capacity": settings.cache.l1.max_size,
-            "ttl_default_seconds": settings.cache.l1.ttl
+            "eviction": settings.L1_EVICTION_STRATEGY,
+            "capacity": settings.L1_MAX_SIZE,
+            "ttl_default_seconds": settings.L1_TTL_SECONDS
         },
         "l2_policy": {
-            "strategy": settings.cache.l2.redis_url and "write_through" or "disabled",
-            "capacity": settings.cache.l2.ttl
+            "strategy": settings.CACHE_STRATEGY,
+            "capacity": settings.L2_MAX_CAPACITY
         },
         "advanced": {
-            "cost_aware": settings.cache.advanced.cost_aware,
-            "cost_threshold": settings.cache.advanced.cost_threshold,
-            "prefetching_enabled": settings.cache.advanced.prefetch_enabled
+            "cost_aware": settings.COST_AWARE_EVICTION_ENABLED,
+            "cost_threshold": 0.0,
+            "prefetching_enabled": settings.PREDICTIVE_PREFETCH_ENABLED
         }
     }
 
@@ -103,17 +104,17 @@ async def update_policies(
     """Update caching policies."""
     # Dynamically update the application configuration at runtime
     if l1_eviction:
-        settings.cache.l1.eviction_policy = l1_eviction
+        settings.L1_EVICTION_STRATEGY = l1_eviction
     if l1_ttl_seconds is not None:
-        settings.cache.l1.ttl = l1_ttl_seconds
+        settings.L1_TTL_SECONDS = l1_ttl_seconds
     if cost_aware_enabled is not None:
-        settings.cache.advanced.cost_aware = cost_aware_enabled
+        settings.COST_AWARE_EVICTION_ENABLED = cost_aware_enabled
         
     return {
         "updated": True,
         "policies": {
-            "l1_eviction": settings.cache.l1.eviction_policy,
-            "l1_ttl_seconds": settings.cache.l1.ttl,
-            "cost_aware_enabled": settings.cache.advanced.cost_aware
+            "l1_eviction": settings.L1_EVICTION_STRATEGY,
+            "l1_ttl_seconds": settings.L1_TTL_SECONDS,
+            "cost_aware_enabled": settings.COST_AWARE_EVICTION_ENABLED
         }
     }

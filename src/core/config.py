@@ -214,6 +214,22 @@ class MonitoringConfig:
 
 
 @dataclass
+class LLMConfig:
+    """LLM service configuration."""
+
+    provider: str = "gemini"
+    api_key: Optional[str] = None
+    model: str = "gemini-pro"
+
+    def validate(self) -> None:
+        """Validate LLM configuration."""
+        if self.provider not in ["gemini", "openai"]:
+            raise ConfigurationValidationError(
+                "llm.provider", "Must be one of: gemini, openai"
+            )
+
+
+@dataclass
 class APIConfig:
     """API configuration."""
 
@@ -235,6 +251,7 @@ class SemanticCacheConfig:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     multi_tenancy: MultiTenancyConfig = field(default_factory=MultiTenancyConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
 
     def validate(self) -> None:
         """Validate entire configuration."""
@@ -244,6 +261,7 @@ class SemanticCacheConfig:
         self.similarity.validate()
         self.redis.validate()
         self.database.validate()
+        self.llm.validate()
         logger.info("Configuration validated successfully")
 
     def to_dict(self) -> Dict[str, Any]:
@@ -365,6 +383,14 @@ class ConfigLoader:
         # Monitoring configuration
         if log_level := os.getenv("LOG_LEVEL"):
             self.config.monitoring.log_level = log_level
+
+        # LLM configuration
+        if llm_provider := os.getenv("LLM_PROVIDER"):
+            self.config.llm.provider = llm_provider
+        if llm_api_key := os.getenv("LLM_API_KEY"):
+            self.config.llm.api_key = llm_api_key
+        if llm_model := os.getenv("LLM_MODEL"):
+            self.config.llm.model = llm_model
 
         logger.debug("Environment variables applied to configuration")
 
