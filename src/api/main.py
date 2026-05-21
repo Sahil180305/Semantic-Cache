@@ -3,6 +3,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.openapi.docs import (
+    get_redoc_html,
+    get_swagger_ui_html,
+    get_swagger_ui_oauth2_redirect_html,
+)
 from fastapi.responses import JSONResponse
 import logging
 import sys
@@ -42,13 +47,22 @@ from src.llm.service import LLMService
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
+DOCS_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+    "img-src 'self' data: https://fastapi.tiangolo.com; "
+    "font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; "
+    "connect-src 'self'"
+)
+
 # Create FastAPI application
 app = FastAPI(
     title="Semantic Cache API",
     description="FastAPI REST server for distributed semantic caching system",
     version="2.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=None,
+    redoc_url=None,
     openapi_url="/openapi.json"
 )
 
@@ -75,6 +89,37 @@ app.include_router(cache.router, prefix="/api/v1/cache", tags=["Cache"])
 app.include_router(search.router, prefix="/api/v1", tags=["Search"])
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(tenant.router, prefix="/api/v1/tenant", tags=["Tenant"])
+
+
+@app.get("/docs", include_in_schema=False)
+async def swagger_ui_html():
+    """Serve Swagger UI with a CSP compatible with its assets."""
+    response = get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - Swagger UI",
+        oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
+    )
+    response.headers["Content-Security-Policy"] = DOCS_CSP
+    return response
+
+
+@app.get(app.swagger_ui_oauth2_redirect_url, include_in_schema=False)
+async def swagger_ui_redirect():
+    """Serve Swagger UI OAuth2 redirect helper with the docs CSP."""
+    response = get_swagger_ui_oauth2_redirect_html()
+    response.headers["Content-Security-Policy"] = DOCS_CSP
+    return response
+
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_html():
+    """Serve ReDoc with a CSP compatible with its assets."""
+    response = get_redoc_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - ReDoc",
+    )
+    response.headers["Content-Security-Policy"] = DOCS_CSP
+    return response
 
 
 @app.on_event("startup")
